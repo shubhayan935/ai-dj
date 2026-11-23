@@ -10,7 +10,7 @@ dist/
 build/
 
 # Data & audio artifacts (large / external)
-data/
+/data/
 *.wav
 *.mp3
 *.flac
