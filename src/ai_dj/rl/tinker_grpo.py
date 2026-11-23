@@ -201,6 +201,14 @@ def run_tinker_grpo(config: GRPOConfig, *, dry_run: bool = False) -> dict:
     rng = random.Random(config.seed)
     history: list[dict] = []
     traces_path = config.out_dir / "raw_traces.jsonl"
+    if traces_path.exists() and traces_path.stat().st_size > 0:
+        backup_ts = int(traces_path.stat().st_mtime)
+        backup_path = config.out_dir / f"raw_traces.{backup_ts}.jsonl"
+        suffix = 1
+        while backup_path.exists():
+            backup_path = config.out_dir / f"raw_traces.{backup_ts}_{suffix}.jsonl"
+            suffix += 1
+        traces_path.rename(backup_path)
     traces_path.write_text("", encoding="utf-8")
     t0 = time.time()
 
