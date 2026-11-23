@@ -122,7 +122,9 @@ def fetch_transitions_scalar(raw_dir: Path, force: bool = False) -> Path:
     return out_path
 
 
-def summarize_beat_array(beats: list[float] | np.ndarray) -> tuple[float | None, float | None, float | None, int]:
+def summarize_beat_array(
+    beats: list[float] | np.ndarray,
+) -> tuple[float | None, float | None, float | None, int]:
     """Compute (bpm, bpm_stability, duration_sec, beat_count) from a track's beat timestamps."""
     arr = np.asarray(beats, dtype=np.float64)
     n = int(arr.size)

@@ -33,6 +33,59 @@ VERSION_PAREN_RE = re.compile(
     re.IGNORECASE,
 )
 
+NON_GENRE_TAG_RE = re.compile(
+    r"\b(radio|podcast|show|sessions?|mix|live|festival|clubnight|promo|various|tv|fm|essential|boiler\s+room|resident\s+advisor|on\s+air|cast)\b",
+    re.IGNORECASE,
+)
+
+GENRE_TAG_RE = re.compile(
+    r"\b("
+    r"house|techno|trance|drum\s*&\s*bass|dnb|minimal|disco|electro|electronica|"
+    r"dubstep|acid|hardcore|rave|breakbeat|breaks|ambient|garage|hip[\s-]*hop|"
+    r"downtempo|jungle|funk|soul|trap|bass|dub|gabber|hardstyle|idm|afro|"
+    r"progressive|psytrance|goa|grime|footwork|juke|synth|wave|italo|balearic|"
+    r"tribal|latin|reggae|jazz|pop|rock|experimental|industrial|leftfield|"
+    r"lo[\s-]*fi|ebm|breakcore|neurofunk|liquid|uplifting|big\s*room|melodic|"
+    r"indie|chillout|trip[\s-]*hop|garage|2[\s-]*step|ukg|hard\s*dance|eurodance|"
+    r"trance|tech|deep|nu[\s-]*disco|electroclash|chiptune|ghetto|detroit|chicago"
+    r")\b",
+    re.IGNORECASE,
+)
+
+
+def extract_genres(tags: list[str], dj_name_norm: str | None = None) -> list[str]:
+    """Filter raw MixesDB category tags down to musical genres (no DJ/show/venue leakage)."""
+    genres: list[str] = []
+    seen: set[str] = set()
+    for tag in tags:
+        clean = tag.strip()
+        if not clean:
+            continue
+        norm = normalize_name(clean)
+        if dj_name_norm and norm == dj_name_norm:
+            continue
+        if NON_GENRE_TAG_RE.search(clean):
+            continue
+        if not GENRE_TAG_RE.search(clean):
+            continue
+        if norm not in seen:
+            seen.add(norm)
+            genres.append(clean)
+    return genres
+
+
+def classify_set_phase(progress: float) -> str:
+    """Map normalized set position in [0, 1] to a DJ set pacing phase."""
+    if progress < 0.15:
+        return "opener"
+    if progress < 0.40:
+        return "build"
+    if progress < 0.75:
+        return "peak"
+    if progress < 0.90:
+        return "cooldown"
+    return "closer"
+
 
 @dataclass(frozen=True)
 class ParsedMixTitle:

@@ -1,4 +1,10 @@
-from ai_dj.data.parsing import normalize_name, parse_mix_title, parse_track_title
+from ai_dj.data.parsing import (
+    classify_set_phase,
+    extract_genres,
+    normalize_name,
+    parse_mix_title,
+    parse_track_title,
+)
 
 
 def test_parse_mix_title_with_date_venue_and_series():
@@ -28,3 +34,29 @@ def test_parse_track_title_with_timestamp_version_and_label():
 def test_normalize_name_strips_collaborations():
     assert normalize_name("Bicep feat. Clara La San") == "bicep"
     assert normalize_name("Four Tet b2b Floating Points") == "four tet"
+
+
+def test_extract_genres_strips_dj_names_and_shows():
+    tags = [
+        "Photek",
+        "FACT Mix",
+        "House (Old School)",
+        "Drum & Bass",
+        "Resident Advisor Podcast",
+        "Boiler Room",
+        "Tech House",
+        "Promo Mix",
+    ]
+    assert extract_genres(tags, dj_name_norm="photek") == [
+        "House (Old School)",
+        "Drum & Bass",
+        "Tech House",
+    ]
+
+
+def test_classify_set_phase():
+    assert classify_set_phase(0.05) == "opener"
+    assert classify_set_phase(0.25) == "build"
+    assert classify_set_phase(0.60) == "peak"
+    assert classify_set_phase(0.82) == "cooldown"
+    assert classify_set_phase(0.95) == "closer"
