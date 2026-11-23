@@ -38,6 +38,7 @@ class AudioTrackCard(BaseModel):
     duration_sec: float
     bpm: float
     bpm_stability: float
+    local_bpm_stability: float = 1.0
     beat_times: list[float] = Field(default_factory=list)
     phrase_boundaries_sec: list[float] = Field(default_factory=list)
     key: str
@@ -49,6 +50,63 @@ class AudioTrackCard(BaseModel):
     vocal_activity_mask: list[bool] = Field(default_factory=list)
     recommended_intro_beat: int | None = None
     recommended_outro_beat: int | None = None
+    genres: list[str] = Field(default_factory=list)
+    timbre_embedding: list[float] = Field(default_factory=list)
+    mean_energy: float = 0.0
+    vocal_ratio: float = 0.0
+
+
+def compute_timbre_embedding(y: np.ndarray, sr: int) -> list[float]:
+    """Compute a compact L2-normalized 48-dim sonic/timbre fingerprint (MFCC + spectral stats)."""
+    if len(y) < sr:
+        return [0.0] * 48
+    mfcc = librosa.feature.mfcc(y=y, sr=sr, n_mfcc=20)
+    mfcc_mean = np.mean(mfcc, axis=1)
+    mfcc_std = np.std(mfcc, axis=1)
+    contrast = np.mean(librosa.feature.spectral_contrast(y=y, sr=sr, n_bands=4), axis=1)
+    centroid = float(np.mean(librosa.feature.spectral_centroid(y=y, sr=sr))) / (sr / 2.0)
+    rolloff = float(np.mean(librosa.feature.spectral_rolloff(y=y, sr=sr))) / (sr / 2.0)
+    flatness = float(np.mean(librosa.feature.spectral_flatness(y=y)))
+    vec = np.concatenate(
+        [mfcc_mean, mfcc_std, contrast, np.array([centroid, rolloff, flatness], dtype=np.float64)]
+    ).astype(np.float64)
+    norm = float(np.linalg.norm(vec))
+    if norm > 1e-8:
+        vec = vec / norm
+    return [round(float(x), 5) for x in vec]
+
+
+def timbre_cosine_similarity(a: AudioTrackCard, b: AudioTrackCard) -> float:
+    """Cosine similarity in [-1, 1] between two tracks' timbre embeddings."""
+    if not a.timbre_embedding or not b.timbre_embedding:
+        return 0.0
+    va = np.asarray(a.timbre_embedding, dtype=np.float64)
+    vb = np.asarray(b.timbre_embedding, dtype=np.float64)
+    if va.shape != vb.shape:
+        return 0.0
+    denom = float(np.linalg.norm(va) * np.linalg.norm(vb))
+    if denom <= 1e-8:
+        return 0.0
+    return round(float(np.dot(va, vb) / denom), 4)
+
+
+def _compute_local_bpm_stability(beat_times: list[float], window_beats: int = 16) -> float:
+    """Fraction of sliding beat windows whose local median IBI stays within ±6% of global median."""
+    if len(beat_times) < window_beats + 2:
+        return 0.0
+    ibis = np.diff(np.asarray(beat_times, dtype=np.float64))
+    global_med = float(np.median(ibis))
+    if global_med <= 1e-6:
+        return 0.0
+    stable = 0
+    total = 0
+    step = max(4, window_beats // 2)
+    for start in range(0, len(ibis) - window_beats + 1, step):
+        loc_med = float(np.median(ibis[start : start + window_beats]))
+        if abs(loc_med - global_med) / global_med <= 0.06:
+            stable += 1
+        total += 1
+    return round(stable / max(1, total), 4)
 
 
 def camelot_distance(c1: str, c2: str) -> int:
@@ -286,6 +344,10 @@ def analyze_track(
     vocal_mask = estimate_vocal_activity_mask(y, sr, hop_sec=1.0)
     rec_intro = _find_best_cue_beat(beat_times, vocal_mask, energy_curve, is_intro=True)
     rec_outro = _find_best_cue_beat(beat_times, vocal_mask, energy_curve, is_intro=False)
+    local_stab = _compute_local_bpm_stability(beat_times)
+    timbre_emb = compute_timbre_embedding(y, sr)
+    mean_energy = round(float(np.mean(energy_curve)), 4) if energy_curve else 0.0
+    vocal_ratio = round(float(np.mean(vocal_mask)), 4) if vocal_mask else 0.0
 
     return AudioTrackCard(
         track_id=track_id or audio_path.stem,
@@ -294,6 +356,7 @@ def analyze_track(
         duration_sec=duration_sec,
         bpm=bpm,
         bpm_stability=bpm_stability,
+        local_bpm_stability=local_stab,
         beat_times=beat_times,
         phrase_boundaries_sec=phrase_boundaries,
         key=key_name,
@@ -305,6 +368,9 @@ def analyze_track(
         vocal_activity_mask=vocal_mask,
         recommended_intro_beat=rec_intro,
         recommended_outro_beat=rec_outro,
+        timbre_embedding=timbre_emb,
+        mean_energy=mean_energy,
+        vocal_ratio=vocal_ratio,
     )
 
 
@@ -325,6 +391,8 @@ def analyze_audio_pool(
             if candidate.exists():
                 audio_path = candidate
         card = analyze_track(audio_path, track_id=item["track_id"], sr=sr)
+        if item.get("genres"):
+            card = card.model_copy(update={"genres": list(item["genres"])})
         cards.append(card)
     with tempfile.NamedTemporaryFile(
         mode="w",
