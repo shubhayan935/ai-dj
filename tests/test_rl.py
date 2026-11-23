@@ -142,6 +142,7 @@ def test_phase5_sections_pair_tasks_and_audio_native_messages(tmp_path: Path) ->
     assert len(secs) >= 1
     assert isinstance(secs[0], TrackSection)
     assert secs[0].label == "intro"
+    assert secs[-1].end_beat == len(beats) - 1
 
     c1 = _fake_card("p1", 128.0, "8A", 10, tmp_path)
     c2 = _fake_card("p2", 128.0, "8A", 10, tmp_path)

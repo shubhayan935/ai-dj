@@ -332,6 +332,9 @@ def segment_track_sections(
     boundaries = list(range(0, n_beats, phrase_beats))
     if len(boundaries) < 2:
         return []
+    # Merge short (<16 beat) trailing tails into the preceding final section
+    if (n_beats - 1) - boundaries[-1] < 16:
+        boundaries.pop()
 
     # Low-band (<200 Hz) signal for per-section bass density
     sos_low = butter(4, min(200.0, sr * 0.45) / (sr / 2.0), btype="low", output="sos")
