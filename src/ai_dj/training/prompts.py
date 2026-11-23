@@ -210,6 +210,19 @@ def format_dpo_pair_messages(
         candidates=pair.candidates,
         include_dj=include_dj,
     )
+    chosen_content = format_target_completion(pair.chosen_track_id, pair.chosen_plan)
+    rejected_content = format_target_completion(
+        pair.rejected_track_id,
+        pair.rejected_plan,
+        quantize_phrase=(pair.negative_type != "off_phrase_plan"),
+    )
+    if chosen_content == rejected_content:
+        chosen_content = format_target_completion(
+            pair.chosen_track_id, pair.chosen_plan, quantize_phrase=False
+        )
+        rejected_content = format_target_completion(
+            pair.rejected_track_id, pair.rejected_plan, quantize_phrase=False
+        )
     return {
         "pair_id": pair.pair_id,
         "split": pair.split,
@@ -219,22 +232,8 @@ def format_dpo_pair_messages(
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": user_content},
         ],
-        "chosen": [
-            {
-                "role": "assistant",
-                "content": format_target_completion(pair.chosen_track_id, pair.chosen_plan),
-            }
-        ],
-        "rejected": [
-            {
-                "role": "assistant",
-                "content": format_target_completion(
-                    pair.rejected_track_id,
-                    pair.rejected_plan,
-                    quantize_phrase=(pair.negative_type != "off_phrase_plan"),
-                ),
-            }
-        ],
+        "chosen": [{"role": "assistant", "content": chosen_content}],
+        "rejected": [{"role": "assistant", "content": rejected_content}],
     }
 
 
