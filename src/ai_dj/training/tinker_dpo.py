@@ -79,6 +79,25 @@ def compute_dpo_metrics_np(
     }
 
 
+def _unwrap_tensor_values(val) -> list:
+    """Unwrap a Tinker TensorData, torch.Tensor, numpy array, or plain sequence to a Python list."""
+    if hasattr(val, "tolist"):
+        return list(val.tolist())
+    if hasattr(val, "to_torch"):
+        return list(val.to_torch().tolist())
+    if hasattr(val, "data"):
+        return list(val.data)
+    return list(val)
+
+
+def _full_sequence_for_logprobs(datum):
+    """Append the final target token to datum.model_input so compute_logprobs scores all targets."""
+    targets = _unwrap_tensor_values(datum.loss_fn_inputs["target_tokens"])
+    if not targets:
+        return datum.model_input
+    return datum.model_input.append_int(int(targets[-1]))
+
+
 def _dpo_pair_tokens(row: dict) -> int:
     p_tok = sum(approx_token_count(m["content"]) + 4 for m in row["prompt"])
     c_tok = sum(approx_token_count(m["content"]) + 4 for m in row["chosen"])
@@ -188,19 +207,23 @@ def run_tinker_dpo(config: DPOConfig, *, dry_run: bool = False) -> dict:
                     _build_sft_datum(rejected_conv, tokenizer, renderer, config.max_length)
                 )
 
-            # Reference logprobs (frozen Stage 1 policy)
+            # Reference logprobs (frozen Stage 1 policy) over the full sequence including
+            # the final target token so ref_logps[1:] aligns 1-to-1 with loss_fn_inputs["weights"].
             ref_logp_futs = [
-                ref_sampler.compute_logprobs(d.model_input) for d in interleaved_datums
+                ref_sampler.compute_logprobs(_full_sequence_for_logprobs(d))
+                for d in interleaved_datums
             ]
             ref_logps_raw = [f.result() for f in ref_logp_futs]
             ref_chosen = []
             ref_rejected = []
             for j in range(0, len(interleaved_datums), 2):
                 w_c = torch.tensor(
-                    interleaved_datums[j].loss_fn_inputs["weights"], dtype=torch.float32
+                    _unwrap_tensor_values(interleaved_datums[j].loss_fn_inputs["weights"]),
+                    dtype=torch.float32,
                 )
                 w_r = torch.tensor(
-                    interleaved_datums[j + 1].loss_fn_inputs["weights"], dtype=torch.float32
+                    _unwrap_tensor_values(interleaved_datums[j + 1].loss_fn_inputs["weights"]),
+                    dtype=torch.float32,
                 )
                 lp_c = torch.tensor(
                     [x or 0.0 for x in ref_logps_raw[j][1:]], dtype=torch.float32
@@ -215,8 +238,14 @@ def run_tinker_dpo(config: DPOConfig, *, dry_run: bool = False) -> dict:
                 chosen_lp = []
                 rejected_lp = []
                 for j in range(0, len(data), 2):
-                    w_c = torch.tensor(data[j].loss_fn_inputs["weights"], dtype=torch.float32)
-                    w_r = torch.tensor(data[j + 1].loss_fn_inputs["weights"], dtype=torch.float32)
+                    w_c = torch.tensor(
+                        _unwrap_tensor_values(data[j].loss_fn_inputs["weights"]),
+                        dtype=torch.float32,
+                    )
+                    w_r = torch.tensor(
+                        _unwrap_tensor_values(data[j + 1].loss_fn_inputs["weights"]),
+                        dtype=torch.float32,
+                    )
                     chosen_lp.append((logprobs_list[j] * w_c).sum())
                     rejected_lp.append((logprobs_list[j + 1] * w_r).sum())
                 return compute_dpo_loss(
