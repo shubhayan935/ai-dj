@@ -229,9 +229,17 @@ def analyze_audio_pool(
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     out_jsonl.parent.mkdir(parents=True, exist_ok=True)
     cards: list[AudioTrackCard] = []
-    with out_jsonl.open("w", encoding="utf-8") as fh:
-        for item in manifest:
-            card = analyze_track(Path(item["audio_path"]), track_id=item["track_id"], sr=sr)
-            cards.append(card)
+    for item in manifest:
+        audio_path = Path(item["audio_path"])
+        if not audio_path.is_absolute() and not audio_path.exists():
+            candidate = manifest_path.parent / audio_path.name
+            if candidate.exists():
+                audio_path = candidate
+        card = analyze_track(audio_path, track_id=item["track_id"], sr=sr)
+        cards.append(card)
+    tmp_path = out_jsonl.with_suffix(out_jsonl.suffix + ".tmp")
+    with tmp_path.open("w", encoding="utf-8") as fh:
+        for card in cards:
             fh.write(card.model_dump_json() + "\n")
+    tmp_path.replace(out_jsonl)
     return cards
