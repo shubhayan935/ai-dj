@@ -674,14 +674,12 @@ def mix_song_pair(
 
     render_res = render_transition(card_a, card_b, spec, out_wav=wav_path, sr=sr, stereo=True)
     qa = verify_transition(render_res, card_a, card_b, spec)
-    sec_a = next(
-        (s.label for s in card_a.sections if s.start_beat <= spec.cue_out_beat_a <= s.end_beat),
-        "unknown",
-    )
-    sec_b = next(
-        (s.label for s in card_b.sections if s.start_beat <= spec.cue_in_beat_b <= s.end_beat),
-        "unknown",
-    )
+    from ai_dj.rl.grpo_env import _section_at_beat
+
+    sec_a_obj = _section_at_beat(card_a, spec.cue_out_beat_a)
+    sec_b_obj = _section_at_beat(card_b, spec.cue_in_beat_b)
+    sec_a = sec_a_obj.label if sec_a_obj is not None else "unknown"
+    sec_b = sec_b_obj.label if sec_b_obj is not None else "unknown"
     trace = {
         "label": label,
         "model": base_model,

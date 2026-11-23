@@ -176,6 +176,10 @@ def test_phase5_sections_pair_tasks_and_audio_native_messages(tmp_path: Path) ->
     c2.sections = list(c1.sections)
     tl = format_section_timeline(c1)
     assert "S0:intro@b0-64" in tl and "S1:outro@b64-128" in tl
+    from ai_dj.rl.grpo_env import _section_at_beat
+
+    boundary_sec = _section_at_beat(c1, 64)
+    assert boundary_sec is not None and boundary_sec.label == "outro"
 
     pair_tasks = build_pair_mix_tasks([c1, c2], num_tasks=2, seed=42)
     assert len(pair_tasks) == 2

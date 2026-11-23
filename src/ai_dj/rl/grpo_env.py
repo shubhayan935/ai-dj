@@ -330,8 +330,11 @@ def parse_creative_plan(
 def _section_at_beat(card: AudioTrackCard, beat: int) -> TrackSection | None:
     if not card.sections:
         return None
-    for sec in card.sections:
-        if sec.start_beat <= beat <= sec.end_beat:
+    last_idx = len(card.sections) - 1
+    for idx, sec in enumerate(card.sections):
+        if sec.start_beat <= beat < sec.end_beat or (
+            idx == last_idx and sec.start_beat <= beat <= sec.end_beat
+        ):
             return sec
     return card.sections[-1] if beat > card.sections[-1].end_beat else card.sections[0]
 
