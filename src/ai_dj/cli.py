@@ -392,10 +392,12 @@ def eval_predictions(
     )
     m = report["model_metrics"]["overall"]
     sh = report["schema_health"]
+    ov_mae = m["overlap_beats_mae"]
+    ov_str = f"{ov_mae:.1f}" if ov_mae is not None else "n/a"
     console.print(
         f"[bold]{model_name}[/bold] (n={report['num_examples']:,}) | "
         f"JSON={sh['json_valid_rate']*100:.1f}% | "
-        f"R@1={m['recall_at_1']:.3f} | OvMAE={m['overlap_beats_mae']:.1f} | "
+        f"R@1={m['recall_at_1']:.3f} | OvMAE={ov_str} | "
         f"StyleAcc={m['style_accuracy']:.3f}"
     )
     console.print(f"Comparison written to {out_md}")
