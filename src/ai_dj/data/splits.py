@@ -142,6 +142,7 @@ def load_mixes_and_tracks(
             curated_series=parsed.curated_series,
         )
 
+        mix_split = assign_dj_split(parsed.dj_name_norm)
         ordered_ids: list[str] = []
         for entry in m.get("tracklist") or []:
             tid = entry.get("id")
@@ -150,8 +151,11 @@ def load_mixes_and_tracks(
             ordered_ids.append(tid)
             track_play_counts[tid] += 1
             track_mix_sets[tid].add(mix_id)
-            for genre in genres:
-                track_genres[tid][genre] += 1
+            # Only aggregate track-level genres from train mixes so held-out val/test
+            # mix briefs never leak into candidate track cards.
+            if mix_split == "train":
+                for genre in genres:
+                    track_genres[tid][genre] += 1
             if tid not in track_raw_title and entry.get("title"):
                 track_raw_title[tid] = entry["title"]
         mix_track_order[mix_id] = ordered_ids
