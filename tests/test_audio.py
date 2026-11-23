@@ -25,7 +25,7 @@ def test_clean_render_passes_qa_and_writes_wav(tmp_path: Path) -> None:
         context_beats=12,
     )
     wav_path = tmp_path / "clean_mix.wav"
-    res = render_transition(card_a, card_b, spec, out_wav=wav_path, y_a=y_a, y_b=y_b)
+    res = render_transition(card_a, card_b, spec, out_wav=wav_path, sr=22050, y_a=y_a, y_b=y_b)
     qa = verify_transition(res, card_a, card_b, spec)
 
     assert wav_path.exists() and wav_path.stat().st_size > 10_000
@@ -34,6 +34,22 @@ def test_clean_render_passes_qa_and_writes_wav(tmp_path: Path) -> None:
     assert qa.beat_aligned
     assert not qa.has_clipping
     assert not qa.has_bass_clash
+
+
+def test_filter_sweep_and_stem_strip_blend_pass_qa() -> None:
+    y_a, card_a = synthesize_electronic_track(bpm=124.0, duration_sec=40.0, seed=11)
+    y_b, card_b = synthesize_electronic_track(bpm=125.0, duration_sec=40.0, seed=12)
+    for style in ("filter_sweep", "stem_strip_blend", "long_blend"):
+        spec = RenderSpec(
+            cue_out_beat_a=32,
+            cue_in_beat_b=16,
+            overlap_beats=16,
+            transition_style=style,
+            context_beats=12,
+        )
+        res = render_transition(card_a, card_b, spec, sr=22050, y_a=y_a, y_b=y_b)
+        qa = verify_transition(res, card_a, card_b, spec)
+        assert qa.passed, f"Style {style} failed QA: {qa.defects_detected}"
 
 
 def test_defect_gym_meets_95_pct_recall_gate(tmp_path: Path) -> None:

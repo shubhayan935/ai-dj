@@ -118,12 +118,13 @@ def verify_transition(
     """Run deterministic technical QA checks on a rendered transition."""
     cfg = thresholds or QAThresholds()
     sr = render.sample_rate
-    mix = render.mix
+    raw_mix = render.mix
+    mix_mono = raw_mix.mean(axis=0).astype(np.float32) if raw_mix.ndim == 2 else raw_mix
     s0, s1 = render.overlap_start_sample, render.overlap_end_sample
 
-    pre_seg = mix[:s0]
-    ov_seg = mix[s0:s1]
-    post_seg = mix[s1:]
+    pre_seg = mix_mono[:s0]
+    ov_seg = mix_mono[s0:s1]
+    post_seg = mix_mono[s1:]
 
     # 1. Beat alignment drift inside overlap
     beat_drift_ms = _measure_beat_drift_ms(
@@ -155,10 +156,10 @@ def verify_transition(
     lufs_jump_db = round(max(abs(lufs_ov - lufs_pre), abs(lufs_post - lufs_ov)), 2)
     has_lufs_jump = lufs_jump_db > cfg.max_lufs_jump_db
 
-    # 5. Digital clipping check
-    peak = float(np.max(np.abs(mix))) if len(mix) else 0.0
+    # 5. Digital clipping check (across all channels)
+    peak = float(np.max(np.abs(raw_mix))) if raw_mix.size else 0.0
     peak_dbfs = round(20.0 * np.log10(max(peak, 1e-9)), 2)
-    clipped_samples = int(np.sum(np.abs(mix) >= 0.985))
+    clipped_samples = int(np.sum(np.abs(raw_mix) >= 0.985))
     has_clipping = (peak_dbfs > cfg.max_peak_dbfs) or (clipped_samples >= cfg.max_clipped_samples)
 
     # 6. Low-band (<250 Hz) bass-clash excess during overlap

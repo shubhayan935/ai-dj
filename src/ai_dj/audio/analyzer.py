@@ -47,6 +47,8 @@ class AudioTrackCard(BaseModel):
     peak_dbfs: float
     energy_curve: list[float] = Field(default_factory=list)
     vocal_activity_mask: list[bool] = Field(default_factory=list)
+    recommended_intro_beat: int | None = None
+    recommended_outro_beat: int | None = None
 
 
 def camelot_distance(c1: str, c2: str) -> int:
@@ -55,6 +57,36 @@ def camelot_distance(c1: str, c2: str) -> int:
     n2, l2 = int(c2[:-1]), c2[-1].upper()
     ring_dist = min((n1 - n2) % 12, (n2 - n1) % 12)
     return ring_dist + (0 if l1 == l2 else 1)
+
+
+def load_audio_stereo(audio_path: Path, sr: int = 44100) -> np.ndarray:
+    """Decode any audio file (WAV/MP3/FLAC) to float32 stereo (2, N) at `sr` via ffmpeg."""
+    try:
+        cmd = [
+            "ffmpeg",
+            "-v",
+            "error",
+            "-i",
+            str(audio_path),
+            "-f",
+            "f32le",
+            "-ac",
+            "2",
+            "-ar",
+            str(sr),
+            "pipe:1",
+        ]
+        proc = subprocess.run(cmd, check=True, capture_output=True)
+        raw = np.frombuffer(proc.stdout, dtype=np.float32)
+        if len(raw) >= 2:
+            n_frames = len(raw) // 2
+            return raw[: n_frames * 2].reshape(n_frames, 2).T.copy()
+    except Exception:
+        pass
+    y, _ = librosa.load(str(audio_path), sr=sr, mono=False)
+    if y.ndim == 1:
+        return np.vstack([y, y]).astype(np.float32)
+    return y[:2].astype(np.float32)
 
 
 def load_audio_mono(audio_path: Path, sr: int = 22050) -> np.ndarray:
@@ -159,6 +191,48 @@ def measure_lufs_and_peak(y: np.ndarray, sr: int) -> tuple[float, float]:
     return lufs, peak_dbfs
 
 
+def _find_best_cue_beat(
+    beat_times: list[float],
+    vocal_mask: list[bool],
+    energy_curve: list[float],
+    *,
+    is_intro: bool,
+    window_beats: int = 32,
+) -> int | None:
+    """Pick a phrase-aligned (multiple of 8) cue beat with low vocal clash and steady energy."""
+    n_beats = len(beat_times)
+    if n_beats < window_beats + 16:
+        if is_intro and n_beats > 16:
+            return 8
+        return max(0, (n_beats // 16) * 8) if n_beats else None
+    if is_intro:
+        candidates = list(range(8, min(n_beats - window_beats - 8, int(n_beats * 0.35)), 8))
+    else:
+        lo = max(32, int(n_beats * 0.55) // 8 * 8)
+        hi = max(lo + 8, (n_beats - window_beats - 16) // 8 * 8)
+        candidates = list(range(lo, hi, 8))
+    if not candidates:
+        return 8 if is_intro else max(32, (n_beats // 2) // 8 * 8)
+
+    best_beat = candidates[0]
+    best_score = -1e9
+    for b in candidates:
+        t0 = int(beat_times[b])
+        t1 = int(beat_times[min(n_beats - 1, b + window_beats)])
+        if t1 <= t0:
+            continue
+        v_slice = vocal_mask[t0 : min(len(vocal_mask), t1)]
+        e_slice = energy_curve[t0 : min(len(energy_curve), t1)]
+        vocal_frac = sum(v_slice) / max(1, len(v_slice))
+        mean_e = sum(e_slice) / max(1, len(e_slice))
+        # Prefer low vocal activity and solid groove energy (avoid dead silence < 0.25)
+        score = (1.0 - vocal_frac) * 2.0 + (1.0 if mean_e >= 0.30 else -1.5) - abs(mean_e - 0.65)
+        if score > best_score:
+            best_score = score
+            best_beat = b
+    return best_beat
+
+
 def analyze_track(
     audio_path: Path,
     *,
@@ -170,7 +244,9 @@ def analyze_track(
     duration_sec = round(len(y) / float(sr), 3)
 
     onset_env = librosa.onset.onset_strength(y=y, sr=sr)
-    tempo, beat_frames = librosa.beat.beat_track(onset_envelope=onset_env, sr=sr)
+    tempo, beat_frames = librosa.beat.beat_track(
+        onset_envelope=onset_env, sr=sr, start_bpm=122.0, tightness=120.0
+    )
     bpm = float(np.asarray(tempo).reshape(-1)[0])
     beat_times = [round(float(t), 4) for t in librosa.frames_to_time(beat_frames, sr=sr)]
 
@@ -182,6 +258,11 @@ def analyze_track(
     else:
         bpm = round(bpm, 2)
         bpm_stability = 0.0
+
+    # Fold extreme octave errors (e.g. >165 BPM double-time -> half) into club DJ range
+    if bpm > 165.0:
+        bpm = round(bpm / 2.0, 2)
+        beat_times = beat_times[::2]
 
     # 8-bar (32-beat) phrase boundaries aligned to the beatgrid
     phrase_boundaries = [beat_times[i] for i in range(0, len(beat_times), 32)]
@@ -200,6 +281,8 @@ def analyze_track(
     energy_curve = [round(v / max_rms, 4) for v in rms_vals]
 
     vocal_mask = estimate_vocal_activity_mask(y, sr, hop_sec=1.0)
+    rec_intro = _find_best_cue_beat(beat_times, vocal_mask, energy_curve, is_intro=True)
+    rec_outro = _find_best_cue_beat(beat_times, vocal_mask, energy_curve, is_intro=False)
 
     return AudioTrackCard(
         track_id=track_id or audio_path.stem,
@@ -217,6 +300,8 @@ def analyze_track(
         peak_dbfs=peak_dbfs,
         energy_curve=energy_curve,
         vocal_activity_mask=vocal_mask,
+        recommended_intro_beat=rec_intro,
+        recommended_outro_beat=rec_outro,
     )
 
 
