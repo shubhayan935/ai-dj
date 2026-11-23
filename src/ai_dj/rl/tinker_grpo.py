@@ -6,6 +6,7 @@ import inspect
 import json
 import os
 import random
+import re
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -320,6 +321,11 @@ def run_tinker_grpo(config: GRPOConfig, *, dry_run: bool = False) -> dict:
     return summary
 
 
+def _safe_filename_part(raw: str) -> str:
+    cleaned = re.sub(r"[^A-Za-z0-9._-]+", "_", str(raw)).strip("._-")
+    return cleaned or "track"
+
+
 def plan_and_render_electronic_set(
     cards_jsonl: Path,
     sampler_checkpoint: str,
@@ -395,7 +401,12 @@ def plan_and_render_electronic_set(
             bass_swap_beat_frac=plan.bass_swap_beat_frac,
             context_beats=16,
         )
-        wav_path = out_dir / f"T{idx + 1}_{deck_a.track_id}_to_{deck_b.track_id}.wav"
+        safe_a = _safe_filename_part(deck_a.track_id)
+        safe_b = _safe_filename_part(deck_b.track_id)
+        out_root = out_dir.resolve()
+        wav_path = (out_root / f"T{idx + 1}_{safe_a}_to_{safe_b}.wav").resolve()
+        if not wav_path.is_relative_to(out_root):
+            raise ValueError(f"Unsafe output path for transition WAV: {wav_path}")
         render_res = render_transition(deck_a, deck_b, spec, out_wav=wav_path, sr=sr, stereo=True)
         qa = verify_transition(render_res, deck_a, deck_b, spec)
 
