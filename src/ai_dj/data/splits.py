@@ -455,17 +455,29 @@ def build_cleaned_dataset(
             assert rec.split is not None
             rng = random.Random(f"{seed}:{rec.tran_id}")
             order = mix_track_order.get(rec.mix_id, [])
-            try:
-                pos = order.index(rec.prev_track.track_id)
+            pair_positions = [
+                idx
+                for idx, tid in enumerate(order)
+                if tid == rec.prev_track.track_id
+                and idx + 1 < len(order)
+                and order[idx + 1] == rec.next_track.track_id
+            ]
+            if not pair_positions:
+                pair_positions = [
+                    idx for idx, tid in enumerate(order) if tid == rec.prev_track.track_id
+                ]
+            if pair_positions:
+                pos = min(pair_positions, key=lambda idx: abs(idx - rec.i_tran))
                 hist_ids = order[max(0, pos - history_window) : pos]
-            except ValueError:
+            else:
                 pos = rec.i_tran
                 hist_ids = []
             history = [_to_candidate(tracks[tid]) for tid in hist_ids if tid in tracks]
 
-            total_positions = max(len(order) - 1, rec.i_tran + 1, 1)
-            progress = round(min(1.0, max(0.0, pos / float(total_positions))), 4)
             mix = mixes[rec.mix_id]
+            total_positions = max(mix.num_total_tracks - 1, len(order) - 1, rec.i_tran + 1, 1)
+            set_pos = rec.i_tran if rec.i_tran >= 0 else pos
+            progress = round(min(1.0, max(0.0, set_pos / float(total_positions))), 4)
             bpm_lo, bpm_hi = mix_bpm_bounds.get(rec.mix_id, (None, None))
 
             # Conditioning dropout on train: keep style_reference_dj ~50% of the time so the
