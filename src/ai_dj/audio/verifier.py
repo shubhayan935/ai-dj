@@ -53,8 +53,10 @@ class TransitionQAReport(BaseModel):
 def _region_lufs(y: np.ndarray, sr: int) -> float:
     meter = pyln.Meter(sr)
     x = y.astype(np.float64)
-    if len(x) >= sr:
-        val = float(meter.integrated_loudness(x))
+    n_samples = x.shape[-1]
+    if n_samples >= sr:
+        meas_in = x.T if x.ndim == 2 else x
+        val = float(meter.integrated_loudness(meas_in))
         if np.isfinite(val):
             return round(val, 2)
     rms = float(np.sqrt(np.mean(x**2)) + 1e-9)
@@ -99,10 +101,10 @@ def _measure_beat_drift_ms(
 
 
 def _low_band_rms_db(y: np.ndarray, sr: int, cutoff_hz: float = 250.0) -> float:
-    if len(y) < 64:
+    if y.shape[-1] < 64:
         return -60.0
     sos = butter(4, cutoff_hz / (0.5 * sr), btype="lowpass", output="sos")
-    low = sosfiltfilt(sos, y.astype(np.float64))
+    low = sosfiltfilt(sos, y.astype(np.float64), axis=-1)
     rms = float(np.sqrt(np.mean(low**2)) + 1e-9)
     return 20.0 * np.log10(rms)
 
@@ -119,12 +121,11 @@ def verify_transition(
     cfg = thresholds or QAThresholds()
     sr = render.sample_rate
     raw_mix = render.mix
-    mix_mono = raw_mix.mean(axis=0).astype(np.float32) if raw_mix.ndim == 2 else raw_mix
     s0, s1 = render.overlap_start_sample, render.overlap_end_sample
 
-    pre_seg = mix_mono[:s0]
-    ov_seg = mix_mono[s0:s1]
-    post_seg = mix_mono[s1:]
+    pre_seg = raw_mix[..., :s0]
+    ov_seg = raw_mix[..., s0:s1]
+    post_seg = raw_mix[..., s1:]
 
     # 1. Beat alignment drift inside overlap
     beat_drift_ms = _measure_beat_drift_ms(
