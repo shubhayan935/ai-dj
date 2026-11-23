@@ -25,6 +25,8 @@ class PlannerPrediction:
     predicted_overlap_beats: float | None
     predicted_style: TransitionStyle | None
     predicted_tempo_stretch_pct: float | None = 0.0
+    predicted_cue_out_beat_prev: float | None = None
+    predicted_cue_in_beat_next: float | None = None
 
 
 def _rank_of_target(ranked_ids: list[str], target_id: str) -> int | None:
@@ -72,6 +74,11 @@ def _score_subset(
     overlap_abs_err = 0.0
     valid_overlap_n = 0
     overlap_within_8 = 0
+    phrase_aligned_overlap = 0
+    cue_out_abs_err = 0.0
+    valid_cue_out_n = 0
+    cue_in_abs_err = 0.0
+    valid_cue_in_n = 0
     stretch_abs_err = 0.0
     valid_stretch_n = 0
     style_true: list[str] = []
@@ -94,6 +101,21 @@ def _score_subset(
             valid_overlap_n += 1
             if err_ov <= 8.0:
                 overlap_within_8 += 1
+            rem8 = pred.predicted_overlap_beats % 8.0
+            if min(rem8, 8.0 - rem8) <= 1.0:
+                phrase_aligned_overlap += 1
+
+        if pred.predicted_cue_out_beat_prev is not None:
+            cue_out_abs_err += abs(
+                pred.predicted_cue_out_beat_prev - ex.target_plan.track_cue_out_beat_prev
+            )
+            valid_cue_out_n += 1
+
+        if pred.predicted_cue_in_beat_next is not None:
+            cue_in_abs_err += abs(
+                pred.predicted_cue_in_beat_next - ex.target_plan.track_cue_in_beat_next
+            )
+            valid_cue_in_n += 1
 
         if pred.predicted_tempo_stretch_pct is not None:
             stretch_abs_err += abs(
@@ -117,6 +139,13 @@ def _score_subset(
             round(overlap_abs_err / valid_overlap_n, 2) if valid_overlap_n > 0 else float("nan")
         ),
         "overlap_within_8_beats": round(overlap_within_8 / n, 4),
+        "phrase_aligned_overlap_rate": round(phrase_aligned_overlap / n, 4),
+        "cue_out_beat_mae": (
+            round(cue_out_abs_err / valid_cue_out_n, 2) if valid_cue_out_n > 0 else float("nan")
+        ),
+        "cue_in_beat_mae": (
+            round(cue_in_abs_err / valid_cue_in_n, 2) if valid_cue_in_n > 0 else float("nan")
+        ),
         "style_accuracy": round(style_acc, 4),
         "style_macro_f1": round(_macro_f1(style_true, style_pred, ALL_STYLES), 4),
         "tempo_stretch_mae_pct": (

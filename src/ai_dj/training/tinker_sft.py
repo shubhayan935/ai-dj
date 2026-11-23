@@ -293,6 +293,15 @@ def run_tinker_sft(config: SFTConfig, *, dry_run: bool = False) -> dict:
                 record["val_loss"] = _extract_loss_value(val_res)
 
             history.append(record)
+            if (global_step + 1) % 10 == 0 or should_eval or global_step == 0:
+                val_str = f" val_loss={record['val_loss']:.4f}" if "val_loss" in record else ""
+                loss_str = f"{train_loss:.4f}" if train_loss is not None else "n/a"
+                print(
+                    f"[SFT step {global_step + 1}/{total_steps}] "
+                    f"lr={lr:.2e} train_loss={loss_str}{val_str} "
+                    f"elapsed={record['elapsed_sec']}s",
+                    flush=True,
+                )
             global_step += 1
 
     # Save weights for both downstream sampling/eval and Stage 2 DPO initialization

@@ -285,12 +285,32 @@ def parse_model_output(
         except (TypeError, ValueError):
             stretch = None
 
+    cue_out: float | None = None
+    if "cue_out_beat_prev" in obj and obj["cue_out_beat_prev"] is not None:
+        try:
+            co = float(obj["cue_out_beat_prev"])
+            if 0.0 <= co <= 5000.0:
+                cue_out = co
+        except (TypeError, ValueError):
+            cue_out = None
+
+    cue_in: float | None = None
+    if "cue_in_beat_next" in obj and obj["cue_in_beat_next"] is not None:
+        try:
+            ci = float(obj["cue_in_beat_next"])
+            if 0.0 <= ci <= 5000.0:
+                cue_in = ci
+        except (TypeError, ValueError):
+            cue_in = None
+
     return (
         PlannerPrediction(
             ranked_track_ids=ranked,
             predicted_overlap_beats=overlap,
             predicted_style=style,
             predicted_tempo_stretch_pct=stretch,
+            predicted_cue_out_beat_prev=cue_out,
+            predicted_cue_in_beat_next=cue_in,
         ),
         ParseDiagnostics(
             json_valid=True,

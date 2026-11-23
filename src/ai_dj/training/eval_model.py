@@ -92,7 +92,7 @@ def evaluate_raw_predictions_jsonl(
 
 def sample_tinker_checkpoint(
     split_jsonl: Path,
-    sampler_checkpoint: str,
+    sampler_checkpoint: str | None,
     base_model: str,
     out_predictions_jsonl: Path,
     *,
@@ -100,8 +100,9 @@ def sample_tinker_checkpoint(
     max_examples: int = 200,
     max_tokens: int = 160,
     temperature: float = 0.0,
+    concurrency: int = 32,
 ) -> Path:
-    """Sample completions from a trained Tinker LoRA checkpoint onto a JSONL file."""
+    """Sample completions from a Tinker base model or trained LoRA checkpoint onto a JSONL file."""
     if not os.environ.get("TINKER_API_KEY"):
         raise RuntimeError("TINKER_API_KEY is not set; cannot sample from Tinker checkpoint.")
 
@@ -114,49 +115,71 @@ def sample_tinker_checkpoint(
 
     examples = load_sft_split(split_jsonl)[:max_examples]
     service_client = tinker.ServiceClient()
-    sampling_client = service_client.create_sampling_client(
-        model_path=sampler_checkpoint
-    )
+    if sampler_checkpoint:
+        sampling_client = service_client.create_sampling_client(
+            model_path=sampler_checkpoint
+        )
+    else:
+        sampling_client = service_client.create_sampling_client(
+            base_model=base_model
+        )
     tokenizer, renderer = load_tokenizer_and_renderer(base_model)
+    stop_seqs = renderer.get_stop_sequences() if renderer is not None else None
+    sampling_params = tinker.SamplingParams(
+        max_tokens=max_tokens,
+        temperature=temperature,
+        stop=stop_seqs,
+    )
 
     out_predictions_jsonl.parent.mkdir(parents=True, exist_ok=True)
     with out_predictions_jsonl.open("w", encoding="utf-8") as fh:
-        for ex in examples:
-            messages = [
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {
-                    "role": "user",
-                    "content": format_user_prompt(
-                        ex.set_brief,
-                        ex.history,
-                        ex.current_track,
-                        ex.candidates,
-                        include_dj=include_dj,
-                    ),
-                },
-            ]
-            if renderer is not None:
-                model_input = renderer.build_generation_prompt(messages)
-            else:
-                prompt_ids = _extract_token_ids(
-                    tokenizer.apply_chat_template(
-                        messages, tokenize=True, add_generation_prompt=True
+        for start in range(0, len(examples), concurrency):
+            chunk = examples[start : start + concurrency]
+            futs = []
+            for ex in chunk:
+                messages = [
+                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {
+                        "role": "user",
+                        "content": format_user_prompt(
+                            ex.set_brief,
+                            ex.history,
+                            ex.current_track,
+                            ex.candidates,
+                            include_dj=include_dj,
+                        ),
+                    },
+                ]
+                if renderer is not None:
+                    model_input = renderer.build_generation_prompt(messages)
+                else:
+                    prompt_ids = _extract_token_ids(
+                        tokenizer.apply_chat_template(
+                            messages, tokenize=True, add_generation_prompt=True
+                        )
+                    )
+                    model_input = tinker.ModelInput.from_ints(prompt_ids)
+                futs.append(
+                    (
+                        ex.example_id,
+                        sampling_client.sample(
+                            prompt=model_input,
+                            num_samples=1,
+                            sampling_params=sampling_params,
+                        ),
                     )
                 )
-                model_input = tinker.ModelInput.from_ints(prompt_ids)
-            res = sampling_client.sample(
-                prompt=model_input,
-                num_samples=1,
-                sampling_params=tinker.SamplingParams(
-                    max_tokens=max_tokens,
-                    temperature=temperature,
-                ),
-            ).result()
-            raw_text = tokenizer.decode(res.sequences[0].tokens, skip_special_tokens=True)
-            fh.write(
-                json.dumps({"example_id": ex.example_id, "raw_output": raw_text}) + "\n"
-            )
+            for ex_id, fut in futs:
+                res = fut.result()
+                raw_text = tokenizer.decode(res.sequences[0].tokens, skip_special_tokens=True)
+                fh.write(json.dumps({"example_id": ex_id, "raw_output": raw_text}) + "\n")
     return out_predictions_jsonl
+
+
+def _fmt_opt(val: float, fmt: str) -> str:
+    if val is None or val != val:  # NaN check
+        return "—"
+    return format(val, fmt)
 
 
 def _write_comparison_markdown(report: dict, out_path: Path) -> Path:
@@ -168,21 +191,30 @@ def _write_comparison_markdown(report: dict, out_path: Path) -> Path:
         f" · Valid track ID **{report['schema_health']['valid_track_id_rate'] * 100:.1f}%**"
         f" · Valid style **{report['schema_health']['style_valid_rate'] * 100:.1f}%**",
         "",
-        "| Planner | Recall@1 | Recall@5 | MRR | NDCG@10 | Overlap MAE | Within 8b | Style Acc |",
-        "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+        (
+            "| Planner | Recall@1 | Recall@5 | MRR | Overlap MAE | Within 8b | "
+            "Phrase % | Cue-Out MAE | Cue-In MAE | Style Acc |"
+        ),
+        "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
     ]
     for b in report["baselines"]:
         m = b["metrics"]["overall"]
         lines.append(
             f"| `{b['planner']}` | {m['recall_at_1']:.3f} | {m['recall_at_5']:.3f} | "
-            f"{m['mrr']:.3f} | {m['ndcg_at_10']:.3f} | {m['overlap_beats_mae']:.1f} | "
-            f"{m['overlap_within_8_beats']:.3f} | {m['style_accuracy']:.3f} |"
+            f"{m['mrr']:.3f} | {_fmt_opt(m['overlap_beats_mae'], '.1f')} | "
+            f"{m['overlap_within_8_beats']:.3f} | {m['phrase_aligned_overlap_rate'] * 100:.1f}% | "
+            f"{_fmt_opt(m['cue_out_beat_mae'], '.1f')} | {_fmt_opt(m['cue_in_beat_mae'], '.1f')} | "
+            f"{m['style_accuracy']:.3f} |"
         )
     mm = report["model_metrics"]["overall"]
     lines.append(
         f"| **`{report['model_name']}`** | **{mm['recall_at_1']:.3f}** | "
-        f"**{mm['recall_at_5']:.3f}** | **{mm['mrr']:.3f}** | **{mm['ndcg_at_10']:.3f}** | "
-        f"**{mm['overlap_beats_mae']:.1f}** | **{mm['overlap_within_8_beats']:.3f}** | "
+        f"**{mm['recall_at_5']:.3f}** | **{mm['mrr']:.3f}** | "
+        f"**{_fmt_opt(mm['overlap_beats_mae'], '.1f')}** | "
+        f"**{mm['overlap_within_8_beats']:.3f}** | "
+        f"**{mm['phrase_aligned_overlap_rate'] * 100:.1f}%** | "
+        f"**{_fmt_opt(mm['cue_out_beat_mae'], '.1f')}** | "
+        f"**{_fmt_opt(mm['cue_in_beat_mae'], '.1f')}** | "
         f"**{mm['style_accuracy']:.3f}** |"
     )
     lines.append("")
