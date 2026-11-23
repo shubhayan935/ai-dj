@@ -46,6 +46,10 @@ def test_extract_genres_strips_dj_names_and_shows():
         "Boiler Room",
         "Tech House",
         "Promo Mix",
+        "A State Of Trance",
+        "Defected In The House",
+        "DNB Dojo",
+        "Sun & Bass",
     ]
     assert extract_genres(tags, dj_name_norm="photek") == [
         "House (Old School)",
