@@ -355,7 +355,7 @@ def render_transition(
         gain_b_low = np.ones(ov_n, dtype=np.float64)
 
     if spec.transition_style == "quick_cut":
-        # Phrase-aligned 2-beat cut with a brief high-pass exit tail on Track A (no click)
+        # Phrase-aligned 2-beat cut with a brief click-free high-pass exit tail on Track A
         cut_n = min(ov_n, max(256, int(round(2.0 * beat_dur_a * sr))))
         ramp = _smoothstep(np.linspace(0.0, 1.0, cut_n, dtype=np.float64))
         gain_a = np.zeros(ov_n, dtype=np.float64)
@@ -363,16 +363,24 @@ def render_transition(
         gain_a[:cut_n] = np.cos(0.5 * np.pi * ramp)
         gain_b[:cut_n] = np.sin(0.5 * np.pi * ramp)
         ov_a_hp = _apply_filter_sweep(ov_a, sr, btype="highpass", start_hz=60.0, end_hz=1800.0)
-        ov_mix = (ov_a_hp * gain_a + ov_b * gain_b).astype(np.float32)
+        wet_in = _smoothstep(t / 0.05)
+        ov_a_eff = ov_a * (1.0 - wet_in) + ov_a_hp * wet_in
+        ov_mix = (ov_a_eff * gain_a + ov_b * gain_b).astype(np.float32)
 
     elif spec.transition_style == "filter_sweep":
-        # Silky club filter transition: HPF sweep out on A + LPF open on B + clean bass swap
-        a_mh = _apply_filter_sweep(
-            mid_a + high_a, sr, btype="highpass", start_hz=120.0, end_hz=2600.0
+        # Silky club filter transition: click-free wet/dry HPF out on A + LPF open on B + bass swap
+        a_mh_dry = mid_a + high_a
+        b_mh_dry = mid_b + high_b
+        a_mh_filt = _apply_filter_sweep(
+            a_mh_dry, sr, btype="highpass", start_hz=120.0, end_hz=2600.0
         )
-        b_mh = _apply_filter_sweep(
-            mid_b + high_b, sr, btype="lowpass", start_hz=600.0, end_hz=16000.0
+        b_mh_filt = _apply_filter_sweep(
+            b_mh_dry, sr, btype="lowpass", start_hz=600.0, end_hz=16000.0
         )
+        wet_a = _smoothstep(t / 0.08)
+        dry_b = _smoothstep((t - 0.90) / 0.10)
+        a_mh = a_mh_dry * (1.0 - wet_a) + a_mh_filt * wet_a
+        b_mh = b_mh_filt * (1.0 - dry_b) + b_mh_dry * dry_b
         g_a_mh = np.cos(0.5 * np.pi * _smoothstep((t - 0.15) / 0.85))
         g_b_mh = np.sin(0.5 * np.pi * _smoothstep(t / 0.80))
         ov_mix = (
