@@ -9,6 +9,9 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
+from ai_dj.audio.analyzer import analyze_audio_pool
+from ai_dj.audio.cc_pool import ingest_cc_audio_pool
+from ai_dj.audio.defect_gym import run_defect_gym
 from ai_dj.data.report import write_markdown_report
 from ai_dj.data.sources import (
     fetch_djmix_metadata,
@@ -132,6 +135,85 @@ def eval_baselines(
             )
         console.print(table)
     console.print(f"Baseline report written to {processed_dir / 'eval_baselines.md'}")
+
+
+@app.command("ingest-cc-audio")
+def ingest_cc_audio(
+    out_dir: Annotated[
+        Path, typer.Option(help="Directory to store Creative Commons MP3 audio pool.")
+    ] = Path("data/raw/cc_audio"),
+    max_tracks: Annotated[
+        int, typer.Option(help="Number of CC tracks to download from JamendoMaxCaps.")
+    ] = 12,
+    force: Annotated[bool, typer.Option(help="Re-download even if manifest exists.")] = False,
+) -> None:
+    """Download an open Creative Commons electronic audio pool for DSP rendering & RL."""
+    console.print(f"[bold]Ingesting up to {max_tracks} CC tracks from JamendoMaxCaps...[/bold]")
+    manifest = ingest_cc_audio_pool(out_dir=out_dir, max_tracks=max_tracks, force=force)
+    console.print(f"Saved CC audio manifest to {manifest}")
+
+
+@app.command("analyze-audio")
+def analyze_audio(
+    manifest_path: Annotated[
+        Path, typer.Option(help="Path to CC audio manifest.json.")
+    ] = Path("data/raw/cc_audio/manifest.json"),
+    out_jsonl: Annotated[
+        Path, typer.Option(help="Output JSONL path for AudioTrackCards.")
+    ] = Path("data/processed/cc_track_cards.jsonl"),
+) -> None:
+    """Run deterministic MIR analysis (BPM, beatgrid, Camelot key, LUFS, vocal mask) on CC pool."""
+    console.print(f"[bold]Analyzing CC audio pool from {manifest_path}...[/bold]")
+    cards = analyze_audio_pool(manifest_path=manifest_path, out_jsonl=out_jsonl)
+    table = Table(title=f"MIR AudioTrackCards ({len(cards)} tracks)")
+    table.add_column("Track ID", style="cyan")
+    table.add_column("Dur (s)", justify="right")
+    table.add_column("BPM", justify="right", style="green")
+    table.add_column("Stab", justify="right")
+    table.add_column("Key / Camelot", style="magenta")
+    table.add_column("LUFS", justify="right")
+    for c in cards:
+        table.add_row(
+            c.track_id,
+            f"{c.duration_sec:.1f}",
+            f"{c.bpm:.1f}",
+            f"{c.bpm_stability:.2f}",
+            f"{c.key} ({c.camelot})",
+            f"{c.integrated_lufs:.1f}",
+        )
+    console.print(table)
+    console.print(f"Saved AudioTrackCards to {out_jsonl}")
+
+
+@app.command("run-defect-gym")
+def defect_gym(
+    out_dir: Annotated[
+        Path, typer.Option(help="Directory to write defect gym reports & sample WAV.")
+    ] = Path("data/processed"),
+    num_pairs: Annotated[
+        int, typer.Option(help="Number of clean track pairs to test across 5 defect types.")
+    ] = 8,
+    cc_audio_dir: Annotated[
+        Path, typer.Option(help="Optional CC audio pool dir for a real-audio smoke render.")
+    ] = Path("data/raw/cc_audio"),
+) -> None:
+    """Calibrate QA verifier recall on injected audio defects (Phase 2 exit gate: >95% recall)."""
+    console.print(f"[bold]Running Phase 2 Defect Gym ({num_pairs} pairs x 5 defects)...[/bold]")
+    report = run_defect_gym(out_dir=out_dir, num_pairs=num_pairs, cc_audio_dir=cc_audio_dir)
+    table = Table(title="Phase 2 Defect Gym Calibration")
+    table.add_column("Defect Type", style="cyan")
+    table.add_column("Trials", justify="right")
+    table.add_column("Detected", justify="right")
+    table.add_column("Recall", justify="right", style="green")
+    for d, st in report["per_defect"].items():
+        table.add_row(d, str(st["trials"]), str(st["detected"]), f"{st['recall'] * 100:.1f}%")
+    console.print(table)
+    console.print(
+        f"Overall Recall: [bold green]{report['overall_defect_recall'] * 100:.1f}%[/bold green] "
+        f"| Clean FP Rate: [bold]{report['clean_false_positive_rate'] * 100:.1f}%[/bold] "
+        f"| Exit Gate: [bold]{'PASS' if report['passed_exit_gate'] else 'FAIL'}[/bold]"
+    )
+    console.print(f"Report written to {out_dir / 'defect_gym_report.md'}")
 
 
 @app.command("run-all")
