@@ -434,7 +434,12 @@ def train_grpo_cmd(
     out_dir: Annotated[Path, typer.Option()] = Path(
         "data/processed/training_v2/runs/inkling2_mini_grpo_v1"
     ),
-    base_model: Annotated[str, typer.Option()] = "thinkingmachines/Inkling-2-Mini",
+    base_model: Annotated[
+        str | None,
+        typer.Option(
+            help="Base model (defaults to Inkling-Small if --audio-native else Inkling-2-Mini)."
+        ),
+    ] = None,
     sft_state_checkpoint: Annotated[str | None, typer.Option()] = None,
     num_steps: Annotated[int, typer.Option()] = 20,
     prompts_per_step: Annotated[int, typer.Option()] = 4,
@@ -454,10 +459,19 @@ def train_grpo_cmd(
     """Phase 4/5: Run DSP-verified Tinker LoRA GRPO on verified electronic CC tracks."""
     from ai_dj.rl.tinker_grpo import GRPOConfig, run_tinker_grpo
 
+    resolved_base = (
+        base_model
+        if base_model is not None
+        else (
+            "thinkingmachines/Inkling-Small"
+            if audio_native
+            else "thinkingmachines/Inkling-2-Mini"
+        )
+    )
     cfg = GRPOConfig(
         cards_jsonl=cards_jsonl,
         out_dir=out_dir,
-        base_model=base_model,
+        base_model=resolved_base,
         sft_state_checkpoint=sft_state_checkpoint,
         num_steps=num_steps,
         prompts_per_step=prompts_per_step,
