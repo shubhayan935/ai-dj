@@ -31,12 +31,10 @@ console = Console()
 
 @app.command()
 def ingest(
-    raw_dir: Annotated[
-        Path, typer.Option(help="Directory to store raw downloaded data.")
-    ] = Path("data/raw"),
-    force: Annotated[
-        bool, typer.Option(help="Re-download even if cached files exist.")
-    ] = False,
+    raw_dir: Annotated[Path, typer.Option(help="Directory to store raw downloaded data.")] = Path(
+        "data/raw"
+    ),
+    force: Annotated[bool, typer.Option(help="Re-download even if cached files exist.")] = False,
 ) -> None:
     """Download MixesDB metadata, scalar transition alignments, and track BPM summaries."""
     console.print("[bold]1/3[/bold] Fetching djmix-dataset.json...")
@@ -54,12 +52,12 @@ def ingest(
 
 @app.command()
 def build(
-    raw_dir: Annotated[
-        Path, typer.Option(help="Directory containing ingested raw files.")
-    ] = Path("data/raw"),
-    out_dir: Annotated[
-        Path, typer.Option(help="Output directory for clean datasets.")
-    ] = Path("data/processed"),
+    raw_dir: Annotated[Path, typer.Option(help="Directory containing ingested raw files.")] = Path(
+        "data/raw"
+    ),
+    out_dir: Annotated[Path, typer.Option(help="Output directory for clean datasets.")] = Path(
+        "data/processed"
+    ),
     candidate_pool_size: Annotated[
         int, typer.Option(help="Candidate tracks per SFT/DPO example.")
     ] = 20,
@@ -159,12 +157,12 @@ def ingest_cc_audio(
 
 @app.command("analyze-audio")
 def analyze_audio(
-    manifest_path: Annotated[
-        Path, typer.Option(help="Path to CC audio manifest.json.")
-    ] = Path("data/raw/cc_audio/manifest.json"),
-    out_jsonl: Annotated[
-        Path, typer.Option(help="Output JSONL path for AudioTrackCards.")
-    ] = Path("data/processed/cc_track_cards.jsonl"),
+    manifest_path: Annotated[Path, typer.Option(help="Path to CC audio manifest.json.")] = Path(
+        "data/raw/cc_audio/manifest.json"
+    ),
+    out_jsonl: Annotated[Path, typer.Option(help="Output JSONL path for AudioTrackCards.")] = Path(
+        "data/processed/cc_track_cards.jsonl"
+    ),
 ) -> None:
     """Run deterministic MIR analysis (BPM, beatgrid, Camelot key, LUFS, vocal mask) on CC pool."""
     console.print(f"[bold]Analyzing CC audio pool from {manifest_path}...[/bold]")
@@ -287,15 +285,15 @@ def train_sft(
     base_model: Annotated[
         str, typer.Option(help="Tinker base model ID.")
     ] = "thinkingmachines/Inkling-2-Mini",
-    train_jsonl: Annotated[
-        Path, typer.Option(help="Path to sft_train_chat.jsonl.")
-    ] = Path("data/processed/training/sft_train_chat.jsonl"),
-    val_jsonl: Annotated[
-        Path, typer.Option(help="Path to sft_val_chat.jsonl.")
-    ] = Path("data/processed/training/sft_val_chat.jsonl"),
-    out_dir: Annotated[
-        Path, typer.Option(help="Directory for SFT run logs and summary.")
-    ] = Path("data/processed/training/runs/sft_v1"),
+    train_jsonl: Annotated[Path, typer.Option(help="Path to sft_train_chat.jsonl.")] = Path(
+        "data/processed/training/sft_train_chat.jsonl"
+    ),
+    val_jsonl: Annotated[Path, typer.Option(help="Path to sft_val_chat.jsonl.")] = Path(
+        "data/processed/training/sft_val_chat.jsonl"
+    ),
+    out_dir: Annotated[Path, typer.Option(help="Directory for SFT run logs and summary.")] = Path(
+        "data/processed/training/runs/sft_v1"
+    ),
     save_name: Annotated[str, typer.Option(help="Tinker checkpoint name.")] = "ai-dj-sft-v1",
     lora_rank: Annotated[int, typer.Option(help="LoRA rank.")] = 32,
     learning_rate: Annotated[float, typer.Option(help="Peak learning rate.")] = 2e-4,
@@ -332,12 +330,12 @@ def train_dpo(
     sft_state_checkpoint: Annotated[
         str | None, typer.Option(help="Optional Tinker state checkpoint from Stage 1 SFT.")
     ] = None,
-    dpo_jsonl: Annotated[
-        Path, typer.Option(help="Path to dpo_train_chat.jsonl.")
-    ] = Path("data/processed/training/dpo_train_chat.jsonl"),
-    out_dir: Annotated[
-        Path, typer.Option(help="Directory for DPO run logs and summary.")
-    ] = Path("data/processed/training/runs/dpo_v1"),
+    dpo_jsonl: Annotated[Path, typer.Option(help="Path to dpo_train_chat.jsonl.")] = Path(
+        "data/processed/training/dpo_train_chat.jsonl"
+    ),
+    out_dir: Annotated[Path, typer.Option(help="Directory for DPO run logs and summary.")] = Path(
+        "data/processed/training/runs/dpo_v1"
+    ),
     save_name: Annotated[str, typer.Option(help="Tinker checkpoint name.")] = "ai-dj-dpo-v1",
     dpo_beta: Annotated[float, typer.Option(help="DPO KL beta.")] = 0.1,
     learning_rate: Annotated[float, typer.Option(help="Peak learning rate.")] = 1e-5,
@@ -378,9 +376,9 @@ def eval_predictions(
     ] = Path("data/processed/training/predictions.jsonl"),
     model_name: Annotated[str, typer.Option(help="Label for the evaluated model.")] = "sft_v1",
     without_dj: Annotated[bool, typer.Option(help="Evaluate in without_dj mode.")] = False,
-    out_md: Annotated[
-        Path, typer.Option(help="Output Markdown comparison report path.")
-    ] = Path("data/processed/training/model_eval_comparison.md"),
+    out_md: Annotated[Path, typer.Option(help="Output Markdown comparison report path.")] = Path(
+        "data/processed/training/model_eval_comparison.md"
+    ),
 ) -> None:
     """Score a model's raw JSONL completions head-to-head against Phase 1 baselines."""
     report = evaluate_raw_predictions_jsonl(
@@ -396,11 +394,102 @@ def eval_predictions(
     ov_str = f"{ov_mae:.1f}" if ov_mae is not None else "n/a"
     console.print(
         f"[bold]{model_name}[/bold] (n={report['num_examples']:,}) | "
-        f"JSON={sh['json_valid_rate']*100:.1f}% | "
+        f"JSON={sh['json_valid_rate'] * 100:.1f}% | "
         f"R@1={m['recall_at_1']:.3f} | OvMAE={ov_str} | "
         f"StyleAcc={m['style_accuracy']:.3f}"
     )
     console.print(f"Comparison written to {out_md}")
+
+
+@app.command("ingest-electronic-pool")
+def ingest_electronic_pool_cmd(
+    out_dir: Annotated[Path, typer.Option()] = Path("data/raw/cc_electronic"),
+    cards_out: Annotated[Path, typer.Option()] = Path(
+        "data/processed/electronic_track_cards.jsonl"
+    ),
+    max_tracks: Annotated[int, typer.Option()] = 24,
+    max_shards: Annotated[int, typer.Option()] = 8,
+    force: Annotated[bool, typer.Option()] = False,
+) -> None:
+    """Ingest MTG-Jamendo genre-filtered electronic CC tracks and extract MIR + timbre cards."""
+    from ai_dj.audio.analyzer import analyze_audio_pool
+    from ai_dj.audio.cc_pool import ingest_electronic_cc_pool
+
+    manifest = ingest_electronic_cc_pool(
+        out_dir=out_dir, max_tracks=max_tracks, max_shards=max_shards, force=force
+    )
+    cards = analyze_audio_pool(manifest, cards_out)
+    stable = [c for c in cards if c.local_bpm_stability >= 0.70 and 105.0 <= c.bpm <= 155.0]
+    console.print(
+        f"Ingested & analyzed [bold]{len(cards)}[/bold] verified electronic tracks "
+        f"([green]{len(stable)} club-stable 105–155 BPM[/green]) -> {cards_out}"
+    )
+
+
+@app.command("train-grpo")
+def train_grpo_cmd(
+    cards_jsonl: Annotated[Path, typer.Option()] = Path(
+        "data/processed/electronic_track_cards.jsonl"
+    ),
+    out_dir: Annotated[Path, typer.Option()] = Path(
+        "data/processed/training_v2/runs/inkling2_mini_grpo_v1"
+    ),
+    base_model: Annotated[str, typer.Option()] = "thinkingmachines/Inkling-2-Mini",
+    sft_state_checkpoint: Annotated[str | None, typer.Option()] = None,
+    num_steps: Annotated[int, typer.Option()] = 20,
+    prompts_per_step: Annotated[int, typer.Option()] = 4,
+    group_size: Annotated[int, typer.Option()] = 4,
+    learning_rate: Annotated[float, typer.Option()] = 2e-5,
+    save_name: Annotated[str, typer.Option()] = "ai-dj-inkling2-mini-grpo-v1",
+    dry_run: Annotated[
+        bool, typer.Option(help="Validate GRPO tasks & reward without Tinker.")
+    ] = False,
+) -> None:
+    """Phase 4: Run DSP-verified Tinker LoRA GRPO on verified electronic CC tracks."""
+    from ai_dj.rl.tinker_grpo import GRPOConfig, run_tinker_grpo
+
+    cfg = GRPOConfig(
+        cards_jsonl=cards_jsonl,
+        out_dir=out_dir,
+        base_model=base_model,
+        sft_state_checkpoint=sft_state_checkpoint,
+        num_steps=num_steps,
+        prompts_per_step=prompts_per_step,
+        group_size=group_size,
+        learning_rate=learning_rate,
+        save_name=save_name,
+    )
+    res = run_tinker_grpo(cfg, dry_run=dry_run)
+    console.print(f"GRPO ({res['mode']}) complete. Output in [bold]{out_dir}[/bold]")
+
+
+@app.command("render-model-set")
+def render_model_set_cmd(
+    sampler_checkpoint: Annotated[
+        str, typer.Option(help="Tinker sampler_weights checkpoint path.")
+    ],
+    cards_jsonl: Annotated[Path, typer.Option()] = Path(
+        "data/processed/electronic_track_cards.jsonl"
+    ),
+    base_model: Annotated[str, typer.Option()] = "thinkingmachines/Inkling-2-Mini",
+    out_dir: Annotated[Path, typer.Option()] = Path("data/processed/electronic_grpo_miniset"),
+    num_transitions: Annotated[int, typer.Option()] = 3,
+) -> None:
+    """Have a trained Tinker checkpoint plan and render a 44.1kHz stereo electronic mini-set."""
+    from ai_dj.rl.tinker_grpo import plan_and_render_electronic_set
+
+    report = plan_and_render_electronic_set(
+        cards_jsonl=cards_jsonl,
+        sampler_checkpoint=sampler_checkpoint,
+        base_model=base_model,
+        out_dir=out_dir,
+        num_transitions=num_transitions,
+    )
+    n_tr = len(report["transitions"])
+    console.print(
+        f"Rendered {n_tr} transitions -> [bold]{report['showcase_wav']}[/bold] "
+        f"({report['showcase_duration_sec']}s)"
+    )
 
 
 @app.command("run-all")
