@@ -33,6 +33,232 @@ VERSION_PAREN_RE = re.compile(
     re.IGNORECASE,
 )
 
+NON_GENRE_TAG_RE = re.compile(
+    r"\b(radio|podcast|show|sessions?|mix|live|festival|clubnight|promo|various|tv|fm|essential|boiler\s+room|resident\s+advisor|on\s+air|cast)\b",
+    re.IGNORECASE,
+)
+
+GENRE_TAG_RE = re.compile(
+    r"\b("
+    r"house|techno|trance|drum\s*&\s*bass|dnb|minimal|disco|electro|electronica|"
+    r"dubstep|acid|hardcore|rave|breakbeat|breaks|ambient|garage|hip[\s-]*hop|"
+    r"downtempo|jungle|funk|soul|trap|bass|dub|gabber|hardstyle|idm|afro|"
+    r"progressive|psytrance|goa|grime|footwork|juke|synth|wave|italo|balearic|"
+    r"tribal|latin|reggae|jazz|pop|rock|experimental|industrial|leftfield|"
+    r"lo[\s-]*fi|ebm|breakcore|neurofunk|liquid|uplifting|big\s*room|melodic|"
+    r"indie|chillout|trip[\s-]*hop|garage|2[\s-]*step|ukg|hard\s*dance|eurodance|"
+    r"trance|tech|deep|nu[\s-]*disco|electroclash|chiptune|ghetto|detroit|chicago"
+    r")\b",
+    re.IGNORECASE,
+)
+
+
+# Allowed vocabulary for pure musical genre tags: every word in a tag must belong here so
+# radio shows / venues / labels containing a genre word (e.g. "A State Of Trance",
+# "Defected In The House", "DNB Dojo") are rejected.
+GENRE_ALLOWED_TOKENS: frozenset[str] = frozenset(
+    {
+        "2",
+        "70s",
+        "80s",
+        "90s",
+        "00s",
+        "acid",
+        "afro",
+        "ambient",
+        "amapiano",
+        "baile",
+        "balearic",
+        "bass",
+        "bassline",
+        "beat",
+        "beats",
+        "berlin",
+        "big",
+        "blues",
+        "boogie",
+        "boombap",
+        "breakbeat",
+        "breakcore",
+        "breaks",
+        "broken",
+        "chicago",
+        "chill",
+        "chillout",
+        "chillwave",
+        "chiptune",
+        "classic",
+        "classical",
+        "club",
+        "coldwave",
+        "cosmic",
+        "dance",
+        "dancehall",
+        "dark",
+        "darkwave",
+        "deep",
+        "detroit",
+        "disco",
+        "dnb",
+        "downtempo",
+        "dream",
+        "drill",
+        "drone",
+        "drum",
+        "dub",
+        "dubstep",
+        "early",
+        "ebm",
+        "electro",
+        "electroclash",
+        "electronic",
+        "electronica",
+        "eurodance",
+        "experimental",
+        "fi",
+        "folk",
+        "footwork",
+        "french",
+        "funk",
+        "funky",
+        "future",
+        "g",
+        "gabber",
+        "garage",
+        "ghetto",
+        "glitch",
+        "goa",
+        "gqom",
+        "grime",
+        "groovy",
+        "halftime",
+        "happy",
+        "hard",
+        "hardcore",
+        "hardgroove",
+        "hardstyle",
+        "hip",
+        "hop",
+        "house",
+        "hypnotic",
+        "idm",
+        "indie",
+        "indietronica",
+        "industrial",
+        "italo",
+        "jackin",
+        "jazz",
+        "jazzy",
+        "jersey",
+        "juke",
+        "jump",
+        "jungle",
+        "krautrock",
+        "kuduro",
+        "latin",
+        "leftfield",
+        "liquid",
+        "lo",
+        "london",
+        "melodic",
+        "metal",
+        "miami",
+        "microhouse",
+        "minimal",
+        "modern",
+        "n",
+        "neurofunk",
+        "new",
+        "noise",
+        "nu",
+        "nyc",
+        "old",
+        "oldschool",
+        "organic",
+        "pop",
+        "post",
+        "progressive",
+        "psychedelic",
+        "psytrance",
+        "punk",
+        "rap",
+        "rave",
+        "raw",
+        "reggae",
+        "retrowave",
+        "rnb",
+        "rock",
+        "rollers",
+        "room",
+        "school",
+        "schranz",
+        "shoegaze",
+        "soul",
+        "soulful",
+        "soundtrack",
+        "space",
+        "speed",
+        "step",
+        "synth",
+        "synthesizer",
+        "synthpop",
+        "synthwave",
+        "tech",
+        "techno",
+        "trance",
+        "trap",
+        "tribal",
+        "trip",
+        "two",
+        "uk",
+        "ukg",
+        "up",
+        "uplifting",
+        "us",
+        "vaporwave",
+        "vocal",
+        "wave",
+        "world",
+    }
+)
+
+
+def extract_genres(tags: list[str], dj_name_norm: str | None = None) -> list[str]:
+    """Filter raw MixesDB category tags down to musical genres (no DJ/show/venue leakage)."""
+    genres: list[str] = []
+    seen: set[str] = set()
+    for tag in tags:
+        clean = tag.strip()
+        if not clean:
+            continue
+        norm = normalize_name(clean)
+        if dj_name_norm and norm == dj_name_norm:
+            continue
+        if NON_GENRE_TAG_RE.search(clean):
+            continue
+        if not GENRE_TAG_RE.search(clean):
+            continue
+        tokens = re.findall(r"[a-z0-9]+", clean.lower())
+        if not tokens or not all(tok in GENRE_ALLOWED_TOKENS for tok in tokens):
+            continue
+        if norm not in seen:
+            seen.add(norm)
+            genres.append(clean)
+    return genres
+
+
+def classify_set_phase(progress: float) -> str:
+    """Map normalized set position in [0, 1] to a DJ set pacing phase."""
+    if progress < 0.15:
+        return "opener"
+    if progress < 0.40:
+        return "build"
+    if progress < 0.75:
+        return "peak"
+    if progress < 0.90:
+        return "cooldown"
+    return "closer"
+
 
 @dataclass(frozen=True)
 class ParsedMixTitle:

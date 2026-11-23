@@ -11,7 +11,13 @@ from pathlib import Path
 
 import pyarrow.parquet as pq
 
-from ai_dj.data.parsing import normalize_name, parse_mix_title, parse_track_title
+from ai_dj.data.parsing import (
+    classify_set_phase,
+    extract_genres,
+    normalize_name,
+    parse_mix_title,
+    parse_track_title,
+)
 from ai_dj.data.quality import (
     QualityConfig,
     assign_quality_tiers,
@@ -23,6 +29,7 @@ from ai_dj.data.schemas import (
     CandidateTrackSummary,
     DPOPair,
     MixSet,
+    SetBrief,
     SFTExample,
     SplitName,
     TrackCard,
@@ -31,7 +38,11 @@ from ai_dj.data.schemas import (
 )
 
 
-def assign_dj_split(dj_name_norm: str, train_ratio: float = 0.80, val_ratio: float = 0.10) -> SplitName:
+def assign_dj_split(
+    dj_name_norm: str,
+    train_ratio: float = 0.80,
+    val_ratio: float = 0.10,
+) -> SplitName:
     """Deterministically assign a DJ to train/val/test so no DJ leaks across splits."""
     digest = hashlib.sha256(dj_name_norm.encode("utf-8")).digest()
     bucket = int.from_bytes(digest[:4], "big") / float(2**32)
@@ -106,6 +117,7 @@ def load_mixes_and_tracks(
             if val:
                 tags.append(val)
         parsed = parse_mix_title(m.get("title", ""), tags)
+        genres = extract_genres(tags, parsed.dj_name_norm)
         num_total = int(m.get("num_total_tracks") or 0)
         num_id = int(m.get("num_identified_tracks") or 0)
         id_ratio = round(num_id / num_total, 4) if num_total > 0 else 0.0
@@ -122,6 +134,7 @@ def load_mixes_and_tracks(
             mix_date=parsed.mix_date,
             year=parsed.year,
             tags=tags,
+            genres=genres,
             num_total_tracks=num_total,
             num_identified_tracks=num_id,
             num_available_transitions=int(m.get("num_available_transitions") or 0),
@@ -129,6 +142,7 @@ def load_mixes_and_tracks(
             curated_series=parsed.curated_series,
         )
 
+        mix_split = assign_dj_split(parsed.dj_name_norm)
         ordered_ids: list[str] = []
         for entry in m.get("tracklist") or []:
             tid = entry.get("id")
@@ -137,8 +151,11 @@ def load_mixes_and_tracks(
             ordered_ids.append(tid)
             track_play_counts[tid] += 1
             track_mix_sets[tid].add(mix_id)
-            for tag in tags:
-                track_genres[tid][tag] += 1
+            # Only aggregate track-level genres from train mixes so held-out val/test
+            # mix briefs never leak into candidate track cards.
+            if mix_split == "train":
+                for genre in genres:
+                    track_genres[tid][genre] += 1
             if tid not in track_raw_title and entry.get("title"):
                 track_raw_title[tid] = entry["title"]
         mix_track_order[mix_id] = ordered_ids
@@ -176,6 +193,7 @@ def build_cleaned_dataset(
     config: QualityConfig | None = None,
     candidate_pool_size: int = 20,
     history_window: int = 3,
+    dj_dropout_prob: float = 0.50,
     seed: int = 42,
 ) -> dict:
     """Run full join -> quality filter -> tier ranking -> DJ-disjoint split -> JSONL export."""
@@ -226,7 +244,9 @@ def build_cleaned_dataset(
         # tran_wpts is in half-beats (2 warping points per beat) and measures the actual
         # audible transition window between cue_out_prev and cue_in_next.
         tran_wpts = float(r["tran_wpts"] or 0.0)
-        overlap_beats = round(tran_wpts / 2.0, 2) if tran_wpts > 0 else float(r["overlap_beats"] or 0.0)
+        overlap_beats = (
+            round(tran_wpts / 2.0, 2) if tran_wpts > 0 else float(r["overlap_beats"] or 0.0)
+        )
         key_prev = int(r["key_change_prev"] or 0)
         key_next = int(r["key_change_next"] or 0)
 
@@ -308,24 +328,91 @@ def build_cleaned_dataset(
         rec.quality.tier = tier_map[i]
         rec.split = assign_dj_split(rec.dj_name_norm)
 
-    # Build BPM-sorted track index for fast hard-negative sampling
+    # Build BPM-sorted track indices (global + per-genre) for O(log N) hard-negative sampling
     bpm_indexed = sorted(
-        [(tc.bpm, tid) for tid, tc in tracks.items() if tc.bpm is not None and 70.0 <= tc.bpm <= 185.0]
+        [
+            (tc.bpm, tid)
+            for tid, tc in tracks.items()
+            if tc.bpm is not None and 70.0 <= tc.bpm <= 185.0
+        ]
     )
     bpm_keys = [x[0] for x in bpm_indexed]
 
-    def sample_bpm_distractors(
+    genre_bpm_raw: dict[str, list[tuple[float, str]]] = defaultdict(list)
+    for bpm_val, tid in bpm_indexed:
+        for g in tracks[tid].genres:
+            genre_bpm_raw[g.lower()].append((bpm_val, tid))
+    genre_bpm_indexed: dict[str, tuple[list[float], list[str]]] = {
+        g: ([x[0] for x in lst], [x[1] for x in lst]) for g, lst in genre_bpm_raw.items()
+    }
+
+    def sample_hard_distractors(
         target_bpm: float,
+        target_genres: list[str],
         exclude_ids: set[str],
         k: int,
         rng: random.Random,
     ) -> list[TrackCard]:
-        lo = bisect.bisect_left(bpm_keys, target_bpm * 0.94)
-        hi = bisect.bisect_right(bpm_keys, target_bpm * 1.06)
-        pool = [bpm_indexed[j][1] for j in range(lo, hi) if bpm_indexed[j][1] not in exclude_ids]
-        if len(pool) < k:
-            pool = [tid for _, tid in bpm_indexed if tid not in exclude_ids]
-        chosen_ids = rng.sample(pool, min(k, len(pool)))
+        """Sample BPM-matched distractors with ~75% same-genre hard negatives."""
+        lo_bpm = target_bpm * 0.94
+        hi_bpm = target_bpm * 1.06
+
+        chosen_ids: list[str] = []
+        chosen_set = set(exclude_ids)
+
+        # 1. Sample ~75% from BPM + genre-matched hard negatives via per-genre bisect
+        n_hard_target = round(k * 0.75)
+        if target_genres and n_hard_target > 0:
+            genre_candidates: list[str] = []
+            seen_g: set[str] = set()
+            for g in target_genres:
+                entry = genre_bpm_indexed.get(g.lower())
+                if not entry:
+                    continue
+                g_keys, g_tids = entry
+                glo = bisect.bisect_left(g_keys, lo_bpm)
+                ghi = bisect.bisect_right(g_keys, hi_bpm)
+                # Cap per-genre slice by random reservoir sampling if huge
+                span = ghi - glo
+                if span <= 0:
+                    continue
+                idxs = rng.sample(range(glo, ghi), min(span, n_hard_target * 4))
+                for idx in idxs:
+                    tid = g_tids[idx]
+                    if tid not in chosen_set and tid not in seen_g:
+                        seen_g.add(tid)
+                        genre_candidates.append(tid)
+            if genre_candidates:
+                hard_ids = rng.sample(genre_candidates, min(n_hard_target, len(genre_candidates)))
+                chosen_ids.extend(hard_ids)
+                chosen_set.update(hard_ids)
+
+        # 2. Fill remaining slots from global BPM-matched pool
+        rem = k - len(chosen_ids)
+        if rem > 0:
+            lo = bisect.bisect_left(bpm_keys, lo_bpm)
+            hi = bisect.bisect_right(bpm_keys, hi_bpm)
+            span = hi - lo
+            if span >= rem + len(chosen_set):
+                # Rejection sample directly from [lo, hi) in O(rem)
+                attempts = 0
+                while len(chosen_ids) < k and attempts < rem * 20:
+                    attempts += 1
+                    tid = bpm_indexed[rng.randrange(lo, hi)][1]
+                    if tid not in chosen_set:
+                        chosen_set.add(tid)
+                        chosen_ids.append(tid)
+            if len(chosen_ids) < k:
+                fallback = [
+                    bpm_indexed[j][1]
+                    for j in range(lo, hi)
+                    if bpm_indexed[j][1] not in chosen_set
+                ]
+                if len(fallback) < k - len(chosen_ids):
+                    fallback = [tid for _, tid in bpm_indexed if tid not in chosen_set]
+                extra = rng.sample(fallback, min(k - len(chosen_ids), len(fallback)))
+                chosen_ids.extend(extra)
+
         return [tracks[tid] for tid in chosen_ids]
 
     # Write clean transitions, SFT splits, and DPO pairs
@@ -343,7 +430,24 @@ def build_cleaned_dataset(
     }
     dpo_handle = (out_dir / "dpo_train.jsonl").open("w", encoding="utf-8")
 
+    # Precompute per-mix BPM range (p10..p90) for SetBrief conditioning
+    mix_bpm_bounds: dict[str, tuple[float | None, float | None]] = {}
+    for mid, tids in mix_track_order.items():
+        bpms_m = sorted(
+            tracks[tid].bpm
+            for tid in tids
+            if tid in tracks and tracks[tid].bpm is not None and 70.0 <= tracks[tid].bpm <= 185.0
+        )
+        if bpms_m:
+            n_b = len(bpms_m)
+            lo_b = round(bpms_m[int(0.10 * (n_b - 1))], 1)
+            hi_b = round(bpms_m[int(0.90 * (n_b - 1))], 1)
+            mix_bpm_bounds[mid] = (lo_b, hi_b)
+        else:
+            mix_bpm_bounds[mid] = (None, None)
+
     sft_counts: Counter[str] = Counter()
+    train_dj_kept = 0
     dpo_count = 0
 
     try:
@@ -351,17 +455,59 @@ def build_cleaned_dataset(
             assert rec.split is not None
             rng = random.Random(f"{seed}:{rec.tran_id}")
             order = mix_track_order.get(rec.mix_id, [])
-            try:
-                pos = order.index(rec.prev_track.track_id)
+            pair_positions = [
+                idx
+                for idx, tid in enumerate(order)
+                if tid == rec.prev_track.track_id
+                and idx + 1 < len(order)
+                and order[idx + 1] == rec.next_track.track_id
+            ]
+            if not pair_positions:
+                pair_positions = [
+                    idx for idx, tid in enumerate(order) if tid == rec.prev_track.track_id
+                ]
+            if pair_positions:
+                pos = min(pair_positions, key=lambda idx: abs(idx - rec.i_tran))
                 hist_ids = order[max(0, pos - history_window) : pos]
-            except ValueError:
+            else:
+                pos = rec.i_tran
                 hist_ids = []
             history = [_to_candidate(tracks[tid]) for tid in hist_ids if tid in tracks]
 
+            mix = mixes[rec.mix_id]
+            total_positions = max(mix.num_total_tracks - 1, len(order) - 1, rec.i_tran + 1, 1)
+            set_pos = rec.i_tran if rec.i_tran >= 0 else pos
+            progress = round(min(1.0, max(0.0, set_pos / float(total_positions))), 4)
+            bpm_lo, bpm_hi = mix_bpm_bounds.get(rec.mix_id, (None, None))
+
+            # Conditioning dropout on train: keep style_reference_dj ~50% of the time so the
+            # model supports both DJ-steered ("mix like Four Tet") and DJ-free set briefs.
+            if rec.split == "train":
+                keep_dj = rng.random() >= dj_dropout_prob
+                if keep_dj:
+                    train_dj_kept += 1
+                style_ref_dj = rec.dj_name if keep_dj else None
+            else:
+                style_ref_dj = rec.dj_name
+
+            set_brief = SetBrief(
+                genres=mix.genres[:5],
+                curated_series=mix.curated_series,
+                target_bpm_min=bpm_lo,
+                target_bpm_max=bpm_hi,
+                set_progress=progress,
+                set_phase=classify_set_phase(progress),
+                style_reference_dj=style_ref_dj,
+            )
+
             exclude = {rec.prev_track.track_id, rec.next_track.track_id, *hist_ids}
             anchor_bpm = rec.prev_track.bpm or 125.0
-            distractors = sample_bpm_distractors(
-                anchor_bpm, exclude, candidate_pool_size - 1, rng
+            # Only bias distractors toward genre-tagged tracks when the target itself has
+            # train-observed genres; otherwise target vs. distractor genre availability
+            # becomes asymmetric on unseen val/test tracks.
+            distractor_genres = set_brief.genres if rec.next_track.genres else []
+            distractors = sample_hard_distractors(
+                anchor_bpm, distractor_genres, exclude, candidate_pool_size - 1, rng
             )
             candidates = [_to_candidate(rec.next_track)] + [_to_candidate(d) for d in distractors]
             rng.shuffle(candidates)
@@ -373,7 +519,7 @@ def build_cleaned_dataset(
                 composite_score=rec.quality.composite_score,
                 mix_id=rec.mix_id,
                 dj_name=rec.dj_name,
-                mix_tags=rec.mix_tags[:6],
+                set_brief=set_brief,
                 history=history,
                 current_track=_to_candidate(rec.prev_track),
                 candidates=candidates,
@@ -392,7 +538,7 @@ def build_cleaned_dataset(
                     split="train",
                     negative_type="bpm_matched_distractor",
                     mix_id=rec.mix_id,
-                    mix_tags=rec.mix_tags[:6],
+                    set_brief=set_brief,
                     history=history,
                     current_track=_to_candidate(rec.prev_track),
                     candidates=candidates,
@@ -410,7 +556,7 @@ def build_cleaned_dataset(
                     split="train",
                     negative_type="off_phrase_plan",
                     mix_id=rec.mix_id,
-                    mix_tags=rec.mix_tags[:6],
+                    set_brief=set_brief,
                     history=history,
                     current_track=_to_candidate(rec.prev_track),
                     candidates=candidates,
@@ -441,8 +587,8 @@ def build_cleaned_dataset(
         if rec.quality.passed_hard_gates and rec.split:
             style_counts[rec.plan.transition_style] += 1
             split_djs[rec.split].add(rec.dj_name_norm)
-            for tag in rec.mix_tags:
-                genre_counts[tag] += 1
+            for genre in mixes[rec.mix_id].genres:
+                genre_counts[genre] += 1
             if rec.curated_series:
                 series_counts[rec.curated_series] += 1
 
@@ -491,6 +637,9 @@ def build_cleaned_dataset(
         "tier_counts": dict(tier_counts),
         "failure_reason_counts": dict(failure_counts.most_common()),
         "sft_split_counts": dict(sft_counts),
+        "train_dj_conditioned_pct": round(
+            100.0 * train_dj_kept / max(1, sft_counts["train"]), 2
+        ),
         "dpo_train_pairs": dpo_count,
         "unique_djs_per_split": {k: len(v) for k, v in split_djs.items()},
         "dj_leakage_check": {

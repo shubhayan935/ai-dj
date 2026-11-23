@@ -16,6 +16,19 @@ TransitionStyle = Literal[
 
 QualityTier = Literal["gold", "silver", "bronze", "rejected"]
 SplitName = Literal["train", "val", "test"]
+SetPhase = Literal["opener", "build", "peak", "cooldown", "closer"]
+
+
+class SetBrief(BaseModel):
+    """Taste and pacing profile conditioning the AI DJ planner."""
+
+    genres: list[str] = Field(default_factory=list)
+    curated_series: str | None = None
+    target_bpm_min: float | None = None
+    target_bpm_max: float | None = None
+    set_progress: float = Field(default=0.5, ge=0.0, le=1.0)
+    set_phase: SetPhase = "peak"
+    style_reference_dj: str | None = None
 
 
 class TrackCard(BaseModel):
@@ -51,6 +64,7 @@ class MixSet(BaseModel):
     mix_date: str | None = None
     year: int | None = None
     tags: list[str] = Field(default_factory=list)
+    genres: list[str] = Field(default_factory=list)
     num_total_tracks: int = 0
     num_identified_tracks: int = 0
     num_available_transitions: int = 0
@@ -135,7 +149,7 @@ class SFTExample(BaseModel):
     composite_score: float
     mix_id: str
     dj_name: str
-    mix_tags: list[str]
+    set_brief: SetBrief
     history: list[CandidateTrackSummary]
     current_track: CandidateTrackSummary
     candidates: list[CandidateTrackSummary]
@@ -150,7 +164,7 @@ class DPOPair(BaseModel):
     split: SplitName
     negative_type: Literal["bpm_matched_distractor", "off_phrase_plan"]
     mix_id: str
-    mix_tags: list[str]
+    set_brief: SetBrief
     history: list[CandidateTrackSummary]
     current_track: CandidateTrackSummary
     candidates: list[CandidateTrackSummary]

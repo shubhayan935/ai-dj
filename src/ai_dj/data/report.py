@@ -17,8 +17,11 @@ def write_markdown_report(summary: dict, out_path: Path) -> Path:
         f"| Raw Mixes Loaded | {summary['total_mixes_loaded']:,} |",
         f"| Unique Tracks Indexed | {summary['total_tracks_indexed']:,} |",
         f"| Raw Aligned Transitions | {summary['total_raw_transitions']:,} |",
-        f"| Clean Transitions (Passed Hard Gates) | {summary['total_clean_transitions']:,} ({summary['retention_rate_pct']}%) |",
-        f"| Gold / Silver / Bronze | {summary['tier_counts'].get('gold', 0):,} / {summary['tier_counts'].get('silver', 0):,} / {summary['tier_counts'].get('bronze', 0):,} |",
+        f"| Clean Transitions (Passed Hard Gates) | "
+        f"{summary['total_clean_transitions']:,} ({summary['retention_rate_pct']}%) |",
+        f"| Gold / Silver / Bronze | {summary['tier_counts'].get('gold', 0):,} / "
+        f"{summary['tier_counts'].get('silver', 0):,} / "
+        f"{summary['tier_counts'].get('bronze', 0):,} |",
         f"| DPO Train Pairs (Taste + Execution) | {summary['dpo_train_pairs']:,} |",
         "",
         "## Hard-Gate Failure Breakdown (Non-Exclusive)",
@@ -37,9 +40,9 @@ def write_markdown_report(summary: dict, out_path: Path) -> Path:
         "| --- | ---: | ---: |",
     ]
     for sp in ("train", "val", "test"):
-        lines.append(
-            f"| `{sp}` | {summary['sft_split_counts'].get(sp, 0):,} | {summary['unique_djs_per_split'].get(sp, 0):,} |"
-        )
+        cnt = summary["sft_split_counts"].get(sp, 0)
+        djs = summary["unique_djs_per_split"].get(sp, 0)
+        lines.append(f"| `{sp}` | {cnt:,} | {djs:,} |")
     leak = summary["dj_leakage_check"]
     lines += [
         "",

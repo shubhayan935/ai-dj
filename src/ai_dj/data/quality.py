@@ -163,7 +163,9 @@ def score_transition(
     )
 
 
-def assign_quality_tiers(records_scores: list[tuple[int, QualityBreakdown]]) -> dict[int, QualityTier]:
+def assign_quality_tiers(
+    records_scores: list[tuple[int, QualityBreakdown]],
+) -> dict[int, QualityTier]:
     """Assign gold (top 20%), silver (next 50%), bronze (bottom 30%) among passing transitions."""
     passing = [(idx, q.composite_score) for idx, q in records_scores if q.passed_hard_gates]
     passing.sort(key=lambda x: x[1], reverse=True)
