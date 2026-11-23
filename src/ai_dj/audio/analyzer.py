@@ -208,11 +208,14 @@ def _find_best_cue_beat(
     if is_intro:
         candidates = list(range(8, min(n_beats - window_beats - 8, int(n_beats * 0.35)), 8))
     else:
-        lo = max(32, int(n_beats * 0.55) // 8 * 8)
-        hi = max(lo + 8, (n_beats - window_beats - 16) // 8 * 8)
-        candidates = list(range(lo, hi, 8))
+        max_outro = ((n_beats - 1 - window_beats) // 8) * 8
+        lo = min(max_outro, max(32, (int(n_beats * 0.55) // 8) * 8))
+        candidates = list(range(lo, max_outro + 1, 8)) if max_outro >= 8 else []
     if not candidates:
-        return 8 if is_intro else max(32, (n_beats // 2) // 8 * 8)
+        if is_intro:
+            return 8
+        fallback = ((n_beats - 1 - window_beats) // 8) * 8
+        return max(0, fallback)
 
     best_beat = candidates[0]
     best_score = -1e9
