@@ -427,7 +427,7 @@ def plan_and_render_electronic_set(
                 "key_a": deck_a.camelot,
                 "key_b": deck_b.camelot,
                 "style": plan.transition_style,
-                "overlap_beats": plan.overlap_beats,
+                "overlap_beats": spec.overlap_beats,
                 "cue_out_beat_a": spec.cue_out_beat_a,
                 "cue_in_beat_b": spec.cue_in_beat_b,
                 "qa_reward": qa.verifiable_reward,
