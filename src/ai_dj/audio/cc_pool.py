@@ -65,7 +65,9 @@ def ingest_cc_audio_pool(
                 "audio_path": str(dest),
                 "bytes": int(nbytes),
                 "source": "amaai-lab/JamendoMaxCaps",
-                "license": "Creative Commons (MTG-Jamendo)",
+                "source_url": f"https://www.jamendo.com/track/{track_id}",
+                "license": None,
+                "license_status": "unverified_per_track_cc_terms",
             }
         )
 
