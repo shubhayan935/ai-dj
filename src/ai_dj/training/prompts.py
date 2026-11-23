@@ -23,23 +23,42 @@ SYSTEM_PROMPT = (
     "optional reference DJ), recent track history, the currently playing track, and a candidate "
     "crate, choose the single best next track and output an exact symbolic transition plan.\n"
     "Prioritize musical/genre compatibility, coherent set pacing, tight tempo matching, "
-    "phrase-aligned cues (multiples of 8/16/32 beats), and an appropriate blend length and style.\n"
-    "Respond with ONLY a single valid JSON object with keys: "
-    '"next_track_id", "cue_out_beat_prev", "cue_in_beat_next", "overlap_beats", '
-    '"transition_style", "tempo_stretch_next_pct". '
+    "phrase-aligned cues (multiples of 4/8/16 beats), and an appropriate blend style and length.\n"
+    "Respond with ONLY a single valid JSON object with keys in order: "
+    '"next_track_id", "transition_style", "overlap_beats", '
+    '"cue_out_beat_prev", "cue_in_beat_next", "tempo_stretch_next_pct". '
     'Valid transition_style values: "quick_cut", "short_blend", "standard_blend", '
     '"long_blend", "extended_overlay".'
 )
+
+STYLE_PHRASE_BUCKETS: dict[TransitionStyle, tuple[int, ...]] = {
+    "quick_cut": (4,),
+    "short_blend": (8, 16),
+    "standard_blend": (24, 32, 48),
+    "long_blend": (64, 96),
+    "extended_overlay": (128, 160),
+}
+
+
+def quantize_overlap_for_style(overlap_beats: float, style: TransitionStyle) -> int:
+    """Snap overlap length to the nearest DJ phrase bucket valid for the given style."""
+    buckets = STYLE_PHRASE_BUCKETS[style]
+    return min(buckets, key=lambda b: abs(b - overlap_beats))
+
+
+def _quantize_bar_beat(beat: float) -> int:
+    """Snap a beat position to the nearest 4-beat bar boundary."""
+    return max(0, int(round(max(0.0, float(beat)) / 4.0) * 4))
 
 
 class ModelMixPlanOutput(BaseModel):
     """Canonical structured JSON output emitted by the post-trained DJ planner."""
 
     next_track_id: str
+    transition_style: TransitionStyle
+    overlap_beats: float = Field(ge=0.0)
     cue_out_beat_prev: float = Field(ge=0.0)
     cue_in_beat_next: float = Field(ge=0.0)
-    overlap_beats: float = Field(ge=0.0)
-    transition_style: TransitionStyle
     tempo_stretch_next_pct: float = 0.0
 
 
@@ -120,15 +139,39 @@ def format_user_prompt(
     return "\n".join(lines)
 
 
-def format_target_completion(track_id: str, plan: TransitionPlan) -> str:
-    """Serialize ground-truth track choice + symbolic transition plan as compact JSON."""
+def format_target_completion(
+    track_id: str,
+    plan: TransitionPlan,
+    *,
+    quantize_phrase: bool = True,
+) -> str:
+    """Serialize ground-truth track choice + symbolic transition plan as compact JSON.
+
+    Places `transition_style` before `overlap_beats` so greedy decoding selects the
+    macro blend style first, and optionally snaps overlaps/cues to DJ phrase/bar grids.
+    """
+    if quantize_phrase:
+        overlap_val: float = float(
+            quantize_overlap_for_style(plan.overlap_beats, plan.transition_style)
+        )
+        cue_out_val: float = float(_quantize_bar_beat(plan.track_cue_out_beat_prev))
+        cue_in_val: float = float(_quantize_bar_beat(plan.track_cue_in_beat_next))
+    else:
+        overlap_val = round(max(0.0, float(plan.overlap_beats)), 1)
+        cue_out_val = round(max(0.0, float(plan.track_cue_out_beat_prev)), 1)
+        cue_in_val = round(max(0.0, float(plan.track_cue_in_beat_next)), 1)
+
+    stretch_val = round(float(plan.tempo_stretch_next_pct), 1)
+    if stretch_val == 0.0:
+        stretch_val = 0.0
+
     payload = ModelMixPlanOutput(
         next_track_id=track_id,
-        cue_out_beat_prev=round(max(0.0, float(plan.track_cue_out_beat_prev)), 1),
-        cue_in_beat_next=round(max(0.0, float(plan.track_cue_in_beat_next)), 1),
-        overlap_beats=round(max(0.0, float(plan.overlap_beats)), 1),
         transition_style=plan.transition_style,
-        tempo_stretch_next_pct=round(float(plan.tempo_stretch_next_pct), 2),
+        overlap_beats=overlap_val,
+        cue_out_beat_prev=cue_out_val,
+        cue_in_beat_next=cue_in_val,
+        tempo_stretch_next_pct=stretch_val,
     )
     return json.dumps(payload.model_dump(), separators=(",", ":"))
 
@@ -185,7 +228,11 @@ def format_dpo_pair_messages(
         "rejected": [
             {
                 "role": "assistant",
-                "content": format_target_completion(pair.rejected_track_id, pair.rejected_plan),
+                "content": format_target_completion(
+                    pair.rejected_track_id,
+                    pair.rejected_plan,
+                    quantize_phrase=(pair.negative_type != "off_phrase_plan"),
+                ),
             }
         ],
     }
