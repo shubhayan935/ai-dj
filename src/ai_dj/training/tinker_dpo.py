@@ -12,7 +12,12 @@ from pathlib import Path
 from pydantic import BaseModel, Field
 
 from ai_dj.training.dataset import TINKER_TRAIN_PRICE_PER_1M, approx_token_count
-from ai_dj.training.tinker_sft import _build_sft_datum, cosine_lr, load_chat_jsonl
+from ai_dj.training.tinker_sft import (
+    _build_sft_datum,
+    cosine_lr,
+    load_chat_jsonl,
+    load_tokenizer_and_renderer,
+)
 
 
 class DPOConfig(BaseModel):
@@ -153,13 +158,11 @@ def run_tinker_dpo(config: DPOConfig, *, dry_run: bool = False) -> dict:
     ref_sampler = training_client.save_weights_and_get_sampling_client(
         name=f"{config.save_name}-ref"
     ).result()
-    tokenizer = training_client.get_tokenizer()
-
-    renderer = None
-    if config.renderer_name:
-        from tinker_cookbook.renderers import get_renderer
-
-        renderer = get_renderer(config.renderer_name, tokenizer)
+    tokenizer, renderer = load_tokenizer_and_renderer(
+        config.base_model,
+        renderer_name=config.renderer_name,
+        training_client=training_client,
+    )
 
     rng = random.Random(config.seed)
     history: list[dict] = []

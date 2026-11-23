@@ -11,6 +11,7 @@ from ai_dj.eval.baselines import BPMProximityPlanner, HeuristicDJPlanner, Random
 from ai_dj.eval.metrics import PlannerPrediction, evaluate_predictions
 from ai_dj.eval.runner import load_sft_split, run_planner_eval
 from ai_dj.training.prompts import SYSTEM_PROMPT, format_user_prompt, parse_model_output
+from ai_dj.training.tinker_sft import _extract_token_ids, load_tokenizer_and_renderer
 
 
 def evaluate_raw_predictions_jsonl(
@@ -116,9 +117,7 @@ def sample_tinker_checkpoint(
     sampling_client = service_client.create_sampling_client(
         model_path=sampler_checkpoint
     )
-    tokenizer = service_client.create_lora_training_client(
-        base_model=base_model, rank=4
-    ).result().get_tokenizer()
+    tokenizer, renderer = load_tokenizer_and_renderer(base_model)
 
     out_predictions_jsonl.parent.mkdir(parents=True, exist_ok=True)
     with out_predictions_jsonl.open("w", encoding="utf-8") as fh:
@@ -136,11 +135,17 @@ def sample_tinker_checkpoint(
                     ),
                 },
             ]
-            prompt_ids = tokenizer.apply_chat_template(
-                messages, tokenize=True, add_generation_prompt=True
-            )
+            if renderer is not None:
+                model_input = renderer.build_generation_prompt(messages)
+            else:
+                prompt_ids = _extract_token_ids(
+                    tokenizer.apply_chat_template(
+                        messages, tokenize=True, add_generation_prompt=True
+                    )
+                )
+                model_input = tinker.ModelInput.from_ints(prompt_ids)
             res = sampling_client.sample(
-                prompt=tinker.ModelInput.from_ints(list(prompt_ids)),
+                prompt=model_input,
                 num_samples=1,
                 sampling_params=tinker.SamplingParams(
                     max_tokens=max_tokens,

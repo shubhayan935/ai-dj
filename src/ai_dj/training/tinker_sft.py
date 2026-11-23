@@ -61,6 +61,44 @@ def load_chat_jsonl(path: Path) -> list[dict]:
     return rows
 
 
+def load_tokenizer_and_renderer(
+    base_model: str,
+    renderer_name: str | None = None,
+    training_client=None,
+):
+    """Load the model's tokenizer and chat renderer (supports Inkling via tinker_cookbook)."""
+    try:
+        from tinker_cookbook import model_info
+        from tinker_cookbook.renderers import get_renderer
+        from tinker_cookbook.tokenizer_utils import get_tokenizer
+
+        tokenizer = get_tokenizer(base_model)
+        rec_name = renderer_name or model_info.get_recommended_renderer_name(base_model)
+        renderer = get_renderer(rec_name, tokenizer) if rec_name else None
+        return tokenizer, renderer
+    except ImportError:
+        if "inkling" in base_model.lower():
+            raise RuntimeError(
+                f"Inkling model '{base_model}' requires `tinker-cookbook` and `tml-renderers`. "
+                "Install them with `uv sync --extra train`."
+            ) from None
+        if training_client is not None:
+            return training_client.get_tokenizer(), None
+        raise
+
+
+def _extract_token_ids(encoded) -> list[int]:
+    """Extract a flat list of int token IDs from a BatchEncoding, dict, or sequence."""
+    if hasattr(encoded, "get") and "input_ids" in encoded:
+        encoded = encoded["input_ids"]
+    elif hasattr(encoded, "input_ids"):
+        encoded = encoded.input_ids
+    ids = list(encoded)
+    if ids and isinstance(ids[0], (list, tuple)):
+        ids = list(ids[0])
+    return [int(x) for x in ids]
+
+
 def _build_sft_datum(messages: list[dict[str, str]], tokenizer, renderer, max_length: int):
     """Convert a chat conversation to a Tinker Datum with assistant-only loss weights."""
     import tinker
@@ -78,18 +116,25 @@ def _build_sft_datum(messages: list[dict[str, str]], tokenizer, renderer, max_le
 
     # Fallback when tinker_cookbook renderer is not explicitly configured:
     # use HuggingFace chat template on the tokenizer and mask prompt tokens to weight 0.
-    prompt_ids = tokenizer.apply_chat_template(
-        messages[:-1], tokenize=True, add_generation_prompt=True
+    prompt_ids = _extract_token_ids(
+        tokenizer.apply_chat_template(
+            messages[:-1], tokenize=True, add_generation_prompt=True
+        )
     )
-    full_ids = tokenizer.apply_chat_template(
-        messages, tokenize=True, add_generation_prompt=False
-    )
-    full_ids = list(full_ids)[:max_length]
-    prompt_len = min(len(prompt_ids), max(0, len(full_ids) - 1))
+    full_ids = _extract_token_ids(
+        tokenizer.apply_chat_template(
+            messages, tokenize=True, add_generation_prompt=False
+        )
+    )[:max_length]
+    if len(full_ids) < 2:
+        raise ValueError("Tokenized conversation must contain at least 2 tokens.")
 
     input_tokens = full_ids[:-1]
     target_tokens = full_ids[1:]
-    weights = [0.0] * max(0, prompt_len - 1) + [1.0] * (len(target_tokens) - max(0, prompt_len - 1))
+    # Mask all prompt targets to 0.0; if the prompt itself fills/exceeds max_length,
+    # zero_count == len(target_tokens) so prompt text never receives loss weight.
+    zero_count = min(len(target_tokens), max(0, len(prompt_ids) - 1))
+    weights = [0.0] * zero_count + [1.0] * (len(target_tokens) - zero_count)
     return tinker.Datum(
         model_input=tinker.ModelInput.from_ints(input_tokens),
         loss_fn_inputs={
@@ -188,13 +233,11 @@ def run_tinker_sft(config: SFTConfig, *, dry_run: bool = False) -> dict:
         rank=config.lora_rank,
         seed=config.seed,
     ).result()
-    tokenizer = training_client.get_tokenizer()
-
-    renderer = None
-    if config.renderer_name:
-        from tinker_cookbook.renderers import get_renderer
-
-        renderer = get_renderer(config.renderer_name, tokenizer)
+    tokenizer, renderer = load_tokenizer_and_renderer(
+        config.base_model,
+        renderer_name=config.renderer_name,
+        training_client=training_client,
+    )
 
     val_datums = [
         _build_sft_datum(r["messages"], tokenizer, renderer, config.max_length)

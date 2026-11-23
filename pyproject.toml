@@ -25,7 +25,8 @@ dev = [
 train = [
     "tinker",
     "tinker-cookbook",
-    "torch>=2.4.0",
+    "tml-renderers",
+    "torch>=2.10.0",
 ]
 
 [project.scripts]
