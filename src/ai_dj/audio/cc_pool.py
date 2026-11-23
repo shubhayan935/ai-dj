@@ -102,14 +102,20 @@ def ingest_electronic_cc_pool(
                 for item in cached[:max_tracks]
             )
         ):
+            if len(cached) > max_tracks:
+                manifest_path.write_text(
+                    json.dumps(cached[:max_tracks], indent=2), encoding="utf-8"
+                )
             return manifest_path
 
     club_map = load_mtg_jamendo_club_genres(cache_path=out_dir / "mtg_jamendo_genre.tsv")
 
     manifest: list[dict] = []
     seen_ids: set[str] = set()
-    # Reuse any previously downloaded verified club tracks in out_dir
+    # Reuse any previously downloaded verified club tracks in out_dir (up to max_tracks)
     for existing in sorted(out_dir.glob("*.mp3")):
+        if len(manifest) >= max_tracks:
+            break
         tid = existing.stem.lstrip("0")
         if tid in club_map and tid not in seen_ids:
             seen_ids.add(tid)
