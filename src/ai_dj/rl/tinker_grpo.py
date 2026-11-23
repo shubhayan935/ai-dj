@@ -391,12 +391,15 @@ def plan_and_render_electronic_set(
         deck_b = cand_by_id[plan.next_track_id]
         used_ids.add(deck_b.track_id)
 
-        a_max_cue = max(16, len(deck_a.beat_times) - plan.overlap_beats - 4)
-        b_max_cue = max(0, len(deck_b.beat_times) - plan.overlap_beats - 4)
+        max_overlap = min(len(deck_a.beat_times) - 20, len(deck_b.beat_times) - 4)
+        overlap = max(4, min(plan.overlap_beats, max(4, (max_overlap // 4) * 4)))
+        a_max_cue = max(0, len(deck_a.beat_times) - overlap - 4)
+        a_min_cue = min(16, a_max_cue)
+        b_max_cue = max(0, len(deck_b.beat_times) - overlap - 4)
         spec = RenderSpec(
-            cue_out_beat_a=min(max(16, plan.cue_out_beat_prev), a_max_cue),
+            cue_out_beat_a=min(max(a_min_cue, plan.cue_out_beat_prev), a_max_cue),
             cue_in_beat_b=min(max(0, plan.cue_in_beat_next), b_max_cue),
-            overlap_beats=plan.overlap_beats,
+            overlap_beats=overlap,
             transition_style=plan.transition_style,
             bass_swap_beat_frac=plan.bass_swap_beat_frac,
             context_beats=16,
