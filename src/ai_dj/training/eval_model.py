@@ -113,18 +113,21 @@ def sample_tinker_checkpoint(
             "Install `tinker` (`uv pip install tinker`) to sample checkpoints."
         ) from exc
 
+    import inspect
+
     examples = load_sft_split(split_jsonl)[:max_examples]
     service_client = tinker.ServiceClient()
     if sampler_checkpoint:
-        sampling_client = service_client.create_sampling_client(
-            model_path=sampler_checkpoint
-        )
+        sc = service_client.create_sampling_client(model_path=sampler_checkpoint)
     else:
-        sampling_client = service_client.create_sampling_client(
-            base_model=base_model
-        )
+        sc = service_client.create_sampling_client(base_model=base_model)
+    sampling_client = sc.result() if hasattr(sc, "result") else sc
     tokenizer, renderer = load_tokenizer_and_renderer(base_model)
     stop_seqs = renderer.get_stop_sequences() if renderer is not None else None
+    gen_accepts_effort = (
+        renderer is not None
+        and "effort" in inspect.signature(renderer.build_generation_prompt).parameters
+    )
     sampling_params = tinker.SamplingParams(
         max_tokens=max_tokens,
         temperature=temperature,
@@ -151,7 +154,10 @@ def sample_tinker_checkpoint(
                     },
                 ]
                 if renderer is not None:
-                    model_input = renderer.build_generation_prompt(messages)
+                    if gen_accepts_effort:
+                        model_input = renderer.build_generation_prompt(messages, effort=0.0)
+                    else:
+                        model_input = renderer.build_generation_prompt(messages)
                 else:
                     prompt_ids = _extract_token_ids(
                         tokenizer.apply_chat_template(
@@ -171,7 +177,23 @@ def sample_tinker_checkpoint(
                 )
             for ex_id, fut in futs:
                 res = fut.result()
-                raw_text = tokenizer.decode(res.sequences[0].tokens, skip_special_tokens=True)
+                tokens = res.sequences[0].tokens
+                if renderer is not None and hasattr(renderer, "parse_response"):
+                    try:
+                        parsed_msg, _ = renderer.parse_response(tokens)
+                        content = parsed_msg.get("content", "")
+                        if isinstance(content, list):
+                            raw_text = "".join(
+                                p.get("text", "")
+                                for p in content
+                                if isinstance(p, dict) and p.get("type") == "text"
+                            )
+                        else:
+                            raw_text = str(content)
+                    except Exception:
+                        raw_text = tokenizer.decode(tokens, skip_special_tokens=True)
+                else:
+                    raw_text = tokenizer.decode(tokens, skip_special_tokens=True)
                 fh.write(json.dumps({"example_id": ex_id, "raw_output": raw_text}) + "\n")
     return out_predictions_jsonl
 

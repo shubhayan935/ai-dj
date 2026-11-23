@@ -229,7 +229,6 @@ def test_lr_schedule_and_dpo_metrics_math() -> None:
 def test_review_regressions_token_extraction_truncation_dpo_and_invalid_eval(
     tmp_path: Path,
 ) -> None:
-    import math
     from types import SimpleNamespace
 
     from ai_dj.training.tinker_dpo import (
@@ -291,7 +290,7 @@ def test_review_regressions_token_extraction_truncation_dpo_and_invalid_eval(
         "Qwen/Qwen3.6-35B-A3B"
     )
 
-    # BUG 0006: Invalid non-JSON completions earn 0.0 style and within-8b credit
+    # BUG 0006: Invalid non-JSON completions earn 0.0 style and within-8b credit and strict JSON
     ex = _make_sample_example("ex_bad")
     split_path = tmp_path / "sft_val.jsonl"
     split_path.write_text(ex.model_dump_json() + "\n", encoding="utf-8")
@@ -301,10 +300,39 @@ def test_review_regressions_token_extraction_truncation_dpo_and_invalid_eval(
         encoding="utf-8",
     )
     rep = evaluate_raw_predictions_jsonl(split_path, preds_path, model_name="bad_model")
+    json.dumps(rep, allow_nan=False)
     ov = rep["model_metrics"]["overall"]
     assert rep["schema_health"]["json_valid_rate"] == 0.0
     assert ov["recall_at_1"] == 0.0
     assert ov["style_accuracy"] == 0.0
     assert ov["overlap_within_8_beats"] == 0.0
-    assert math.isnan(ov["overlap_beats_mae"])
+    assert ov["overlap_beats_mae"] is None
+    assert ov["cue_out_beat_mae"] is None
+    assert ov["cue_in_beat_mae"] is None
+
+    # Wrong track should not earn cue_in_beat_mae credit, and 0-beat cuts are not phrase-aligned
+    wrong_preds = tmp_path / "wrong_track.jsonl"
+    wrong_preds.write_text(
+        json.dumps(
+            {
+                "example_id": ex.example_id,
+                "raw_output": json.dumps(
+                    {
+                        "next_track_id": "t_d1",
+                        "cue_out_beat_prev": 384,
+                        "cue_in_beat_next": 16,
+                        "overlap_beats": 0,
+                        "transition_style": "quick_cut",
+                        "tempo_stretch_next_pct": 0.0,
+                    }
+                ),
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    rep_wrong = evaluate_raw_predictions_jsonl(split_path, wrong_preds, model_name="wrong_model")
+    ov_wrong = rep_wrong["model_metrics"]["overall"]
+    assert ov_wrong["cue_in_beat_mae"] is None
+    assert ov_wrong["phrase_aligned_overlap_rate"] == 0.0
 
