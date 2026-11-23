@@ -21,6 +21,7 @@ def ingest_cc_audio_pool(
     force: bool = False,
 ) -> Path:
     """Download a small pool of full-length CC-licensed MP3 tracks with provenance metadata."""
+    out_dir = out_dir.resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
     manifest_path = out_dir / "manifest.json"
     if manifest_path.exists() and not force:
