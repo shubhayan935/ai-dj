@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+dist/
+build/
+
+# Data & audio artifacts (large / external)
+data/
+*.wav
+*.mp3
+*.flac
+*.parquet
+*.duckdb
+
+# OS / IDE
+.DS_Store
+.vscode/
+.idea/
