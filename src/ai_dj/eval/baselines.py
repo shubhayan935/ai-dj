@@ -26,7 +26,8 @@ class RandomPlanner:
         self.seed = seed
 
     def predict(self, example: SFTExample, *, include_dj: bool = True) -> PlannerPrediction:
-        rng = random.Random(f"{self.seed}:{example.example_id}:{include_dj}")
+        del include_dj
+        rng = random.Random(f"{self.seed}:{example.example_id}")
         ids = [c.track_id for c in example.candidates]
         rng.shuffle(ids)
         return PlannerPrediction(

@@ -113,9 +113,11 @@ def test_heuristic_and_bpm_baselines_rank_matching_track_first() -> None:
     heur_pred_with = HeuristicDJPlanner().predict(ex, include_dj=True)
     heur_pred_without = HeuristicDJPlanner().predict(ex, include_dj=False)
     rand_pred = RandomPlanner(seed=1).predict(ex, include_dj=True)
+    rand_pred_without = RandomPlanner(seed=1).predict(ex, include_dj=False)
 
     assert bpm_pred.ranked_track_ids[0] == "t_target"
     assert heur_pred_with.ranked_track_ids[0] == "t_target"
     assert heur_pred_without.ranked_track_ids[0] == "t_target"
     assert heur_pred_without.predicted_overlap_beats == 64.0
     assert set(rand_pred.ranked_track_ids) == {"t_target", "t_dist_1", "t_dist_2"}
+    assert rand_pred.ranked_track_ids == rand_pred_without.ranked_track_ids
