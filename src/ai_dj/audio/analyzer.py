@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import tempfile
 from pathlib import Path
 
 import librosa
@@ -237,8 +238,15 @@ def analyze_audio_pool(
                 audio_path = candidate
         card = analyze_track(audio_path, track_id=item["track_id"], sr=sr)
         cards.append(card)
-    tmp_path = out_jsonl.with_suffix(out_jsonl.suffix + ".tmp")
-    with tmp_path.open("w", encoding="utf-8") as fh:
+    with tempfile.NamedTemporaryFile(
+        mode="w",
+        encoding="utf-8",
+        dir=out_jsonl.parent,
+        prefix=f".{out_jsonl.name}.",
+        suffix=".tmp",
+        delete=False,
+    ) as fh:
+        tmp_path = Path(fh.name)
         for card in cards:
             fh.write(card.model_dump_json() + "\n")
     tmp_path.replace(out_jsonl)
