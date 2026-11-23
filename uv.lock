@@ -36,6 +36,7 @@ dev = [
 train = [
     { name = "tinker" },
     { name = "tinker-cookbook" },
+    { name = "tml-renderers" },
     { name = "torch" },
 ]
 
@@ -55,7 +56,8 @@ requires-dist = [
     { name = "soundfile", specifier = ">=0.14.0" },
     { name = "tinker", marker = "extra == 'train'" },
     { name = "tinker-cookbook", marker = "extra == 'train'" },
-    { name = "torch", marker = "extra == 'train'", specifier = ">=2.4.0" },
+    { name = "tml-renderers", marker = "extra == 'train'" },
+    { name = "torch", marker = "extra == 'train'", specifier = ">=2.10.0" },
     { name = "typer", specifier = ">=0.12.0" },
 ]
 provides-extras = ["dev", "train"]

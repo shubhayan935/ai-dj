@@ -8,7 +8,6 @@ from dataclasses import dataclass
 
 from pydantic import BaseModel, Field
 
-from ai_dj.data.quality import classify_transition_style
 from ai_dj.data.schemas import (
     CandidateTrackSummary,
     DPOPair,
@@ -224,21 +223,18 @@ def _extract_json_object(raw_text: str) -> dict | None:
 def parse_model_output(
     raw_text: str,
     candidates: list[CandidateTrackSummary],
-    *,
-    default_overlap_beats: float = 48.0,
 ) -> tuple[PlannerPrediction, ParseDiagnostics]:
     """Parse raw model text into a PlannerPrediction plus schema-validity diagnostics."""
     valid_ids = {c.track_id for c in candidates}
-    cand_order = [c.track_id for c in candidates]
 
     obj = _extract_json_object(raw_text)
     if obj is None:
         return (
             PlannerPrediction(
                 ranked_track_ids=[],
-                predicted_overlap_beats=default_overlap_beats,
-                predicted_style="standard_blend",
-                predicted_tempo_stretch_pct=0.0,
+                predicted_overlap_beats=None,
+                predicted_style=None,
+                predicted_tempo_stretch_pct=None,
             ),
             ParseDiagnostics(
                 json_valid=False,
@@ -265,30 +261,29 @@ def parse_model_output(
                 ranked.append(tid)
                 seen.add(tid)
 
-    # If the model only emitted a single next_track_id, keep remaining candidates out of top-1
-    # without artificially inflating Recall@5 beyond what was explicitly predicted.
-    if not ranked and cand_order:
-        ranked = []
-
-    try:
-        overlap = float(obj.get("overlap_beats", default_overlap_beats))
-        if not (0.0 <= overlap <= 512.0):
-            overlap = default_overlap_beats
-    except (TypeError, ValueError):
-        overlap = default_overlap_beats
+    overlap: float | None = None
+    if "overlap_beats" in obj and obj["overlap_beats"] is not None:
+        try:
+            ov = float(obj["overlap_beats"])
+            if 0.0 <= ov <= 512.0:
+                overlap = ov
+        except (TypeError, ValueError):
+            overlap = None
 
     raw_style = str(obj.get("transition_style", "")).strip()
     style_valid = raw_style in ALL_STYLES
-    style: TransitionStyle = (
-        raw_style if style_valid else classify_transition_style(overlap)  # type: ignore[assignment]
+    style: TransitionStyle | None = (
+        raw_style if style_valid else None  # type: ignore[assignment]
     )
 
-    try:
-        stretch = float(obj.get("tempo_stretch_next_pct", 0.0))
-        if not (-50.0 <= stretch <= 50.0):
-            stretch = 0.0
-    except (TypeError, ValueError):
-        stretch = 0.0
+    stretch: float | None = None
+    if "tempo_stretch_next_pct" in obj and obj["tempo_stretch_next_pct"] is not None:
+        try:
+            st = float(obj["tempo_stretch_next_pct"])
+            if -50.0 <= st <= 50.0:
+                stretch = st
+        except (TypeError, ValueError):
+            stretch = None
 
     return (
         PlannerPrediction(

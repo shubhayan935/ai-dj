@@ -224,3 +224,65 @@ def test_lr_schedule_and_dpo_metrics_math() -> None:
     assert m["accuracy"] == 1.0
     assert m["margin"] > 0.0
     assert 0.5 < m["dpo_loss"] < 0.7
+
+
+def test_review_regressions_token_extraction_truncation_dpo_and_invalid_eval(
+    tmp_path: Path,
+) -> None:
+    import math
+    from types import SimpleNamespace
+
+    from ai_dj.training.tinker_dpo import _full_sequence_for_logprobs, _unwrap_tensor_values
+    from ai_dj.training.tinker_sft import _extract_token_ids
+
+    # BUG 0002: BatchEncoding-style dict returns token IDs, not key names
+    assert _extract_token_ids({"input_ids": [10, 20, 30], "attention_mask": [1, 1, 1]}) == [
+        10,
+        20,
+        30,
+    ]
+    assert _extract_token_ids({"input_ids": [[1, 2, 3]]}) == [1, 2, 3]
+
+    # BUG 0003 & 0004: TensorData-like wrappers unwrap and full sequence appends last target
+    class FakeTensorData:
+        def __init__(self, vals):
+            self._vals = vals
+
+        def tolist(self):
+            return list(self._vals)
+
+    class FakeModelInput:
+        def __init__(self, tokens):
+            self.tokens = list(tokens)
+
+        def append_int(self, tok: int):
+            return FakeModelInput([*self.tokens, tok])
+
+    fake_datum = SimpleNamespace(
+        model_input=FakeModelInput([100, 101, 102]),
+        loss_fn_inputs={
+            "target_tokens": FakeTensorData([101, 102, 103]),
+            "weights": FakeTensorData([0.0, 1.0, 1.0]),
+        },
+    )
+    assert _unwrap_tensor_values(fake_datum.loss_fn_inputs["weights"]) == [0.0, 1.0, 1.0]
+    full_seq = _full_sequence_for_logprobs(fake_datum)
+    assert full_seq.tokens == [100, 101, 102, 103]
+
+    # BUG 0006: Invalid non-JSON completions earn 0.0 style and within-8b credit
+    ex = _make_sample_example("ex_bad")
+    split_path = tmp_path / "sft_val.jsonl"
+    split_path.write_text(ex.model_dump_json() + "\n", encoding="utf-8")
+    preds_path = tmp_path / "bad_preds.jsonl"
+    preds_path.write_text(
+        json.dumps({"example_id": ex.example_id, "raw_output": "not json"}) + "\n",
+        encoding="utf-8",
+    )
+    rep = evaluate_raw_predictions_jsonl(split_path, preds_path, model_name="bad_model")
+    ov = rep["model_metrics"]["overall"]
+    assert rep["schema_health"]["json_valid_rate"] == 0.0
+    assert ov["recall_at_1"] == 0.0
+    assert ov["style_accuracy"] == 0.0
+    assert ov["overlap_within_8_beats"] == 0.0
+    assert math.isnan(ov["overlap_beats_mae"])
+
