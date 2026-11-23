@@ -24,7 +24,21 @@ def ingest_cc_audio_pool(
     out_dir.mkdir(parents=True, exist_ok=True)
     manifest_path = out_dir / "manifest.json"
     if manifest_path.exists() and not force:
-        return manifest_path
+        try:
+            cached = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            cached = None
+        if (
+            isinstance(cached, list)
+            and len(cached) == max_tracks
+            and all(
+                isinstance(item, dict)
+                and int(min_bytes) <= int(item.get("bytes", -1)) <= int(max_bytes)
+                and Path(str(item.get("audio_path", ""))).exists()
+                for item in cached
+            )
+        ):
+            return manifest_path
 
     con = duckdb.connect()
     con.execute("INSTALL httpfs; LOAD httpfs;")
