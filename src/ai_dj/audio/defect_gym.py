@@ -113,16 +113,9 @@ def _apply_defect(
         return render_transition(card_a, card_b, bad_spec, sr=sr, y_a=y_a, y_b=y_b), bad_spec
 
     if defect == "vocal_clash":
-        stem_a_v = _inject_vocal_signal(clean_render.track_a_overlap_stem, sr, 660.0)
-        stem_b_v = _inject_vocal_signal(clean_render.track_b_overlap_stem, sr, 880.0)
-        return (
-            replace(
-                clean_render,
-                track_a_overlap_stem=stem_a_v,
-                track_b_overlap_stem=stem_b_v,
-            ),
-            spec,
-        )
+        y_a_v = _inject_vocal_signal(y_a, sr, 660.0)
+        y_b_v = _inject_vocal_signal(y_b, sr, 880.0)
+        return render_transition(card_a, card_b, spec, sr=sr, y_a=y_a_v, y_b=y_b_v), spec
 
     if defect == "lufs_jump":
         bad_mix = clean_render.mix.copy()
