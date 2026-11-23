@@ -140,7 +140,12 @@ def verify_transition(
     phrase_aligned = (spec.cue_out_beat_a % 8 == 0) and (spec.cue_in_beat_b % 8 == 0)
 
     # 3. Vocal-on-vocal clash ratio during overlap (0.5s frame resolution)
-    mask_a = estimate_vocal_activity_mask(render.track_a_overlap_stem, sr, hop_sec=0.5)
+    stem_a_v = render.track_a_overlap_stem
+    if spec.transition_style == "quick_cut" and card_a.bpm > 0:
+        cut_n = min(len(stem_a_v), max(256, int(round(2.0 * (60.0 / card_a.bpm) * sr))))
+        stem_a_v = stem_a_v.copy()
+        stem_a_v[cut_n:] = 0.0
+    mask_a = estimate_vocal_activity_mask(stem_a_v, sr, hop_sec=0.5)
     mask_b = estimate_vocal_activity_mask(render.track_b_overlap_stem, sr, hop_sec=0.5)
     n_v = min(len(mask_a), len(mask_b))
     if n_v > 0:
