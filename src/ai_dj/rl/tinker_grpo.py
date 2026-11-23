@@ -42,7 +42,7 @@ class GRPOConfig(BaseModel):
     lora_rank: int = 32
     num_steps: int = 20
     prompts_per_step: int = 4
-    group_size: int = 4
+    group_size: int = Field(default=4, ge=2)
     crate_size: int = 8
     learning_rate: float = 2e-5
     temperature: float = 0.85

@@ -438,7 +438,7 @@ def train_grpo_cmd(
     sft_state_checkpoint: Annotated[str | None, typer.Option()] = None,
     num_steps: Annotated[int, typer.Option()] = 20,
     prompts_per_step: Annotated[int, typer.Option()] = 4,
-    group_size: Annotated[int, typer.Option()] = 4,
+    group_size: Annotated[int, typer.Option(min=2)] = 4,
     learning_rate: Annotated[float, typer.Option()] = 2e-5,
     save_name: Annotated[str, typer.Option()] = "ai-dj-inkling2-mini-grpo-v1",
     dry_run: Annotated[
