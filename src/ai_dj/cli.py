@@ -20,6 +20,10 @@ from ai_dj.data.sources import (
 )
 from ai_dj.data.splits import build_cleaned_dataset
 from ai_dj.eval.runner import run_baseline_suite
+from ai_dj.training.dataset import export_training_datasets
+from ai_dj.training.eval_model import evaluate_raw_predictions_jsonl
+from ai_dj.training.tinker_dpo import DPOConfig, run_tinker_dpo
+from ai_dj.training.tinker_sft import SFTConfig, run_tinker_sft
 
 app = typer.Typer(help="AI DJ data acquisition, cleaning, ranking, and dataset export CLI.")
 console = Console()
@@ -214,6 +218,189 @@ def defect_gym(
         f"| Exit Gate: [bold]{'PASS' if report['passed_exit_gate'] else 'FAIL'}[/bold]"
     )
     console.print(f"Report written to {out_dir / 'defect_gym_report.md'}")
+
+
+@app.command("export-training-data")
+def export_training_data(
+    processed_dir: Annotated[
+        Path, typer.Option(help="Directory containing Phase 1 sft_*.jsonl and dpo_train.jsonl.")
+    ] = Path("data/processed"),
+    out_dir: Annotated[
+        Path, typer.Option(help="Output directory for Tinker/chat SFT & DPO JSONLs.")
+    ] = Path("data/processed/training"),
+    include_bronze: Annotated[
+        bool,
+        typer.Option(
+            help="Include bronze-tier transitions in SFT train (default: Gold+Silver only)."
+        ),
+    ] = False,
+) -> None:
+    """Export Tinker/chat-ready SFT and DPO JSONLs plus token & USD cost estimates."""
+    tiers = ("gold", "silver", "bronze") if include_bronze else ("gold", "silver")
+    tier_str = "+".join(tiers)
+    console.print(f"[bold]Exporting Phase 3 SFT ({tier_str}) and DPO chat datasets...[/bold]")
+    summary = export_training_datasets(
+        processed_dir=processed_dir,
+        out_dir=out_dir,
+        train_tiers=tiers,
+    )
+    table = Table(title="Phase 3 Exported Training Datasets")
+    table.add_column("Split", style="cyan")
+    table.add_column("Examples", justify="right")
+    table.add_column("Avg Tokens", justify="right")
+    table.add_column("Approx Total Tokens", justify="right", style="green")
+    for name, st in summary["sft_splits"].items():
+        table.add_row(
+            f"sft_{name}",
+            f"{st['examples']:,}",
+            f"{st['avg_tokens_per_example']:.0f}",
+            f"{st['approx_total_tokens']:,}",
+        )
+    dpo = summary["dpo_train"]
+    if dpo.get("examples"):
+        table.add_row(
+            "dpo_train (2x pass)",
+            f"{dpo['examples']:,}",
+            f"{dpo['avg_tokens_per_pair']:.0f}",
+            f"{dpo['approx_total_tokens']:,}",
+        )
+    console.print(table)
+
+    cost_table = Table(title="Estimated Tinker Cost (2 ep SFT + 1 ep DPO)")
+    cost_table.add_column("Model", style="cyan")
+    cost_table.add_column("SFT (2 ep)", justify="right")
+    cost_table.add_column("DPO (1 ep)", justify="right")
+    cost_table.add_column("Total", justify="right", style="green")
+    for model_id, c in summary["tinker_cost_estimates_usd"].items():
+        cost_table.add_row(
+            model_id,
+            f"${c['sft_2_epochs_usd']:.2f}",
+            f"${c['dpo_1_epoch_usd']:.2f}",
+            f"${c['total_phase3_usd']:.2f}",
+        )
+    console.print(cost_table)
+    console.print(f"Summary written to {out_dir / 'training_dataset_summary.md'}")
+
+
+@app.command("train-sft")
+def train_sft(
+    base_model: Annotated[
+        str, typer.Option(help="Tinker base model ID.")
+    ] = "thinkingmachines/Inkling-2-Mini",
+    train_jsonl: Annotated[
+        Path, typer.Option(help="Path to sft_train_chat.jsonl.")
+    ] = Path("data/processed/training/sft_train_chat.jsonl"),
+    val_jsonl: Annotated[
+        Path, typer.Option(help="Path to sft_val_chat.jsonl.")
+    ] = Path("data/processed/training/sft_val_chat.jsonl"),
+    out_dir: Annotated[
+        Path, typer.Option(help="Directory for SFT run logs and summary.")
+    ] = Path("data/processed/training/runs/sft_v1"),
+    save_name: Annotated[str, typer.Option(help="Tinker checkpoint name.")] = "ai-dj-sft-v1",
+    lora_rank: Annotated[int, typer.Option(help="LoRA rank.")] = 32,
+    learning_rate: Annotated[float, typer.Option(help="Peak learning rate.")] = 2e-4,
+    batch_size: Annotated[int, typer.Option(help="Batch size per step.")] = 32,
+    epochs: Annotated[int, typer.Option(help="Training epochs.")] = 2,
+    max_steps: Annotated[int | None, typer.Option(help="Optional step cap for smoke runs.")] = None,
+    dry_run: Annotated[
+        bool,
+        typer.Option(help="Validate data, schedule, and cost locally without Tinker API calls."),
+    ] = False,
+) -> None:
+    """Run Stage 1 Tinker LoRA SFT on Gold/Silver DJ transitions."""
+    cfg = SFTConfig(
+        base_model=base_model,
+        train_jsonl=train_jsonl,
+        val_jsonl=val_jsonl,
+        out_dir=out_dir,
+        save_name=save_name,
+        lora_rank=lora_rank,
+        learning_rate=learning_rate,
+        batch_size=batch_size,
+        epochs=epochs,
+        max_steps=max_steps,
+    )
+    res = run_tinker_sft(cfg, dry_run=dry_run)
+    console.print(f"[bold green]SFT ({res['mode']}) complete.[/bold green] Output in {out_dir}")
+
+
+@app.command("train-dpo")
+def train_dpo(
+    base_model: Annotated[
+        str, typer.Option(help="Tinker base model ID.")
+    ] = "thinkingmachines/Inkling-2-Mini",
+    sft_state_checkpoint: Annotated[
+        str | None, typer.Option(help="Optional Tinker state checkpoint from Stage 1 SFT.")
+    ] = None,
+    dpo_jsonl: Annotated[
+        Path, typer.Option(help="Path to dpo_train_chat.jsonl.")
+    ] = Path("data/processed/training/dpo_train_chat.jsonl"),
+    out_dir: Annotated[
+        Path, typer.Option(help="Directory for DPO run logs and summary.")
+    ] = Path("data/processed/training/runs/dpo_v1"),
+    save_name: Annotated[str, typer.Option(help="Tinker checkpoint name.")] = "ai-dj-dpo-v1",
+    dpo_beta: Annotated[float, typer.Option(help="DPO KL beta.")] = 0.1,
+    learning_rate: Annotated[float, typer.Option(help="Peak learning rate.")] = 1e-5,
+    batch_size: Annotated[int, typer.Option(help="Pairs per step.")] = 16,
+    epochs: Annotated[int, typer.Option(help="DPO epochs.")] = 1,
+    max_steps: Annotated[int | None, typer.Option(help="Optional step cap for smoke runs.")] = None,
+    dry_run: Annotated[
+        bool,
+        typer.Option(
+            help="Validate DPO data, schedule, and cost locally without Tinker API calls."
+        ),
+    ] = False,
+) -> None:
+    """Run Stage 2 Tinker LoRA DPO on taste & off-phrase preference pairs."""
+    cfg = DPOConfig(
+        base_model=base_model,
+        sft_state_checkpoint=sft_state_checkpoint,
+        dpo_jsonl=dpo_jsonl,
+        out_dir=out_dir,
+        save_name=save_name,
+        dpo_beta=dpo_beta,
+        learning_rate=learning_rate,
+        batch_size=batch_size,
+        epochs=epochs,
+        max_steps=max_steps,
+    )
+    res = run_tinker_dpo(cfg, dry_run=dry_run)
+    console.print(f"[bold green]DPO ({res['mode']}) complete.[/bold green] Output in {out_dir}")
+
+
+@app.command("eval-predictions")
+def eval_predictions(
+    split_jsonl: Annotated[
+        Path, typer.Option(help="Ground-truth sft_val.jsonl or sft_test.jsonl.")
+    ] = Path("data/processed/sft_test.jsonl"),
+    predictions_jsonl: Annotated[
+        Path, typer.Option(help="JSONL of {example_id, raw_output} model completions.")
+    ] = Path("data/processed/training/predictions.jsonl"),
+    model_name: Annotated[str, typer.Option(help="Label for the evaluated model.")] = "sft_v1",
+    without_dj: Annotated[bool, typer.Option(help="Evaluate in without_dj mode.")] = False,
+    out_md: Annotated[
+        Path, typer.Option(help="Output Markdown comparison report path.")
+    ] = Path("data/processed/training/model_eval_comparison.md"),
+) -> None:
+    """Score a model's raw JSONL completions head-to-head against Phase 1 baselines."""
+    report = evaluate_raw_predictions_jsonl(
+        split_jsonl=split_jsonl,
+        predictions_jsonl=predictions_jsonl,
+        model_name=model_name,
+        include_dj=not without_dj,
+        out_md=out_md,
+    )
+    m = report["model_metrics"]["overall"]
+    sh = report["schema_health"]
+    ov_mae = m["overlap_beats_mae"]
+    ov_str = f"{ov_mae:.1f}" if ov_mae is not None else "n/a"
+    console.print(
+        f"[bold]{model_name}[/bold] (n={report['num_examples']:,}) | "
+        f"JSON={sh['json_valid_rate']*100:.1f}% | "
+        f"R@1={m['recall_at_1']:.3f} | OvMAE={ov_str} | "
+        f"StyleAcc={m['style_accuracy']:.3f}"
+    )
+    console.print(f"Comparison written to {out_md}")
 
 
 @app.command("run-all")

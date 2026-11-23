@@ -22,6 +22,12 @@ dev = [
     "pytest>=8.3.0",
     "ruff>=0.7.0",
 ]
+train = [
+    "tinker",
+    "tinker-cookbook",
+    "tml-renderers",
+    "torch>=2.10.0",
+]
 
 [project.scripts]
 ai-dj = "ai_dj.cli:app"

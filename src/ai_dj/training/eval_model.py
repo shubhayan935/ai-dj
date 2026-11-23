@@ -1,0 +1,244 @@
+"""Evaluate post-trained or zero-shot LLM predictions against Phase 1 DJ baselines."""
+
+from __future__ import annotations
+
+import json
+import os
+from pathlib import Path
+
+from ai_dj.data.schemas import SFTExample
+from ai_dj.eval.baselines import BPMProximityPlanner, HeuristicDJPlanner, RandomPlanner
+from ai_dj.eval.metrics import PlannerPrediction, evaluate_predictions
+from ai_dj.eval.runner import load_sft_split, run_planner_eval
+from ai_dj.training.prompts import SYSTEM_PROMPT, format_user_prompt, parse_model_output
+from ai_dj.training.tinker_sft import _extract_token_ids, load_tokenizer_and_renderer
+
+
+def evaluate_raw_predictions_jsonl(
+    split_jsonl: Path,
+    predictions_jsonl: Path,
+    *,
+    model_name: str = "posttrained_model",
+    include_dj: bool = True,
+    out_md: Path | None = None,
+) -> dict:
+    """Score a JSONL of `{example_id, raw_output}` completions against Phase 1 baselines."""
+    all_examples = load_sft_split(split_jsonl)
+    ex_by_id = {ex.example_id: ex for ex in all_examples}
+
+    matched_examples: list[SFTExample] = []
+    parsed_preds: list[PlannerPrediction] = []
+    json_valid = 0
+    valid_track_id = 0
+    style_valid = 0
+
+    with predictions_jsonl.open("r", encoding="utf-8") as fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            row = json.loads(line)
+            ex_id = str(row["example_id"])
+            ex = ex_by_id.get(ex_id)
+            if ex is None:
+                continue
+            raw_output = str(row.get("raw_output", ""))
+            pred, diag = parse_model_output(raw_output, ex.candidates)
+            matched_examples.append(ex)
+            parsed_preds.append(pred)
+            if diag.json_valid:
+                json_valid += 1
+            if diag.valid_track_id:
+                valid_track_id += 1
+            if diag.style_valid:
+                style_valid += 1
+
+    if not matched_examples:
+        raise ValueError(
+            f"No prediction example_ids from {predictions_jsonl} matched {split_jsonl}"
+        )
+
+    n = len(matched_examples)
+    model_metrics = evaluate_predictions(matched_examples, parsed_preds)
+    schema_health = {
+        "json_valid_rate": round(json_valid / n, 4),
+        "valid_track_id_rate": round(valid_track_id / n, 4),
+        "style_valid_rate": round(style_valid / n, 4),
+    }
+
+    baseline_runs: list[dict] = []
+    for planner in (RandomPlanner(seed=42), BPMProximityPlanner(), HeuristicDJPlanner()):
+        baseline_runs.append(
+            {
+                "planner": planner.name,
+                "metrics": run_planner_eval(planner, matched_examples, include_dj=include_dj),
+            }
+        )
+
+    report = {
+        "model_name": model_name,
+        "split_path": str(split_jsonl),
+        "mode": "with_dj" if include_dj else "without_dj",
+        "num_examples": n,
+        "schema_health": schema_health,
+        "model_metrics": model_metrics,
+        "baselines": baseline_runs,
+    }
+
+    if out_md is not None:
+        _write_comparison_markdown(report, out_md)
+    return report
+
+
+def sample_tinker_checkpoint(
+    split_jsonl: Path,
+    sampler_checkpoint: str | None,
+    base_model: str,
+    out_predictions_jsonl: Path,
+    *,
+    include_dj: bool = True,
+    max_examples: int = 200,
+    max_tokens: int = 160,
+    temperature: float = 0.0,
+    concurrency: int = 32,
+) -> Path:
+    """Sample completions from a Tinker base model or trained LoRA checkpoint onto a JSONL file."""
+    if not os.environ.get("TINKER_API_KEY"):
+        raise RuntimeError("TINKER_API_KEY is not set; cannot sample from Tinker checkpoint.")
+
+    try:
+        import tinker
+    except ImportError as exc:
+        raise RuntimeError(
+            "Install `tinker` (`uv pip install tinker`) to sample checkpoints."
+        ) from exc
+
+    import inspect
+
+    examples = load_sft_split(split_jsonl)[:max_examples]
+    service_client = tinker.ServiceClient()
+    if sampler_checkpoint:
+        sc = service_client.create_sampling_client(model_path=sampler_checkpoint)
+    else:
+        sc = service_client.create_sampling_client(base_model=base_model)
+    sampling_client = sc.result() if hasattr(sc, "result") else sc
+    tokenizer, renderer = load_tokenizer_and_renderer(base_model)
+    stop_seqs = renderer.get_stop_sequences() if renderer is not None else None
+    gen_accepts_effort = (
+        renderer is not None
+        and "effort" in inspect.signature(renderer.build_generation_prompt).parameters
+    )
+    sampling_params = tinker.SamplingParams(
+        max_tokens=max_tokens,
+        temperature=temperature,
+        stop=stop_seqs,
+    )
+
+    out_predictions_jsonl.parent.mkdir(parents=True, exist_ok=True)
+    with out_predictions_jsonl.open("w", encoding="utf-8") as fh:
+        for start in range(0, len(examples), concurrency):
+            chunk = examples[start : start + concurrency]
+            futs = []
+            for ex in chunk:
+                messages = [
+                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {
+                        "role": "user",
+                        "content": format_user_prompt(
+                            ex.set_brief,
+                            ex.history,
+                            ex.current_track,
+                            ex.candidates,
+                            include_dj=include_dj,
+                        ),
+                    },
+                ]
+                if renderer is not None:
+                    if gen_accepts_effort:
+                        model_input = renderer.build_generation_prompt(messages, effort=0.0)
+                    else:
+                        model_input = renderer.build_generation_prompt(messages)
+                else:
+                    prompt_ids = _extract_token_ids(
+                        tokenizer.apply_chat_template(
+                            messages, tokenize=True, add_generation_prompt=True
+                        )
+                    )
+                    model_input = tinker.ModelInput.from_ints(prompt_ids)
+                futs.append(
+                    (
+                        ex.example_id,
+                        sampling_client.sample(
+                            prompt=model_input,
+                            num_samples=1,
+                            sampling_params=sampling_params,
+                        ),
+                    )
+                )
+            for ex_id, fut in futs:
+                res = fut.result()
+                tokens = res.sequences[0].tokens
+                if renderer is not None and hasattr(renderer, "parse_response"):
+                    try:
+                        parsed_msg, _ = renderer.parse_response(tokens)
+                        content = parsed_msg.get("content", "")
+                        if isinstance(content, list):
+                            raw_text = "".join(
+                                p.get("text", "")
+                                for p in content
+                                if isinstance(p, dict) and p.get("type") == "text"
+                            )
+                        else:
+                            raw_text = str(content)
+                    except Exception:
+                        raw_text = tokenizer.decode(tokens, skip_special_tokens=True)
+                else:
+                    raw_text = tokenizer.decode(tokens, skip_special_tokens=True)
+                fh.write(json.dumps({"example_id": ex_id, "raw_output": raw_text}) + "\n")
+    return out_predictions_jsonl
+
+
+def _fmt_opt(val: float, fmt: str) -> str:
+    if val is None or val != val:  # NaN check
+        return "—"
+    return format(val, fmt)
+
+
+def _write_comparison_markdown(report: dict, out_path: Path) -> Path:
+    lines: list[str] = [
+        f"# Model Evaluation vs. Phase 1 Baselines (`{report['model_name']}`)",
+        "",
+        f"- Examples evaluated: **{report['num_examples']:,}** (`{report['mode']}`)",
+        f"- Schema health: JSON valid **{report['schema_health']['json_valid_rate'] * 100:.1f}%**"
+        f" · Valid track ID **{report['schema_health']['valid_track_id_rate'] * 100:.1f}%**"
+        f" · Valid style **{report['schema_health']['style_valid_rate'] * 100:.1f}%**",
+        "",
+        (
+            "| Planner | Recall@1 | Recall@5 | MRR | Overlap MAE | Within 8b | "
+            "Phrase % | Cue-Out MAE | Cue-In MAE | Style Acc |"
+        ),
+        "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+    ]
+    for b in report["baselines"]:
+        m = b["metrics"]["overall"]
+        lines.append(
+            f"| `{b['planner']}` | {m['recall_at_1']:.3f} | {m['recall_at_5']:.3f} | "
+            f"{m['mrr']:.3f} | {_fmt_opt(m['overlap_beats_mae'], '.1f')} | "
+            f"{m['overlap_within_8_beats']:.3f} | {m['phrase_aligned_overlap_rate'] * 100:.1f}% | "
+            f"{_fmt_opt(m['cue_out_beat_mae'], '.1f')} | {_fmt_opt(m['cue_in_beat_mae'], '.1f')} | "
+            f"{m['style_accuracy']:.3f} |"
+        )
+    mm = report["model_metrics"]["overall"]
+    lines.append(
+        f"| **`{report['model_name']}`** | **{mm['recall_at_1']:.3f}** | "
+        f"**{mm['recall_at_5']:.3f}** | **{mm['mrr']:.3f}** | "
+        f"**{_fmt_opt(mm['overlap_beats_mae'], '.1f')}** | "
+        f"**{mm['overlap_within_8_beats']:.3f}** | "
+        f"**{mm['phrase_aligned_overlap_rate'] * 100:.1f}%** | "
+        f"**{_fmt_opt(mm['cue_out_beat_mae'], '.1f')}** | "
+        f"**{_fmt_opt(mm['cue_in_beat_mae'], '.1f')}** | "
+        f"**{mm['style_accuracy']:.3f}** |"
+    )
+    lines.append("")
+    out_path.write_text("\n".join(lines), encoding="utf-8")
+    return out_path

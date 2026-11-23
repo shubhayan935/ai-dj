@@ -22,9 +22,11 @@ class PlannerPrediction:
     """Output of any DJ planner (heuristic, zero-shot LLM, or post-trained model)."""
 
     ranked_track_ids: list[str]
-    predicted_overlap_beats: float
-    predicted_style: TransitionStyle
-    predicted_tempo_stretch_pct: float = 0.0
+    predicted_overlap_beats: float | None
+    predicted_style: TransitionStyle | None
+    predicted_tempo_stretch_pct: float | None = 0.0
+    predicted_cue_out_beat_prev: float | None = None
+    predicted_cue_in_beat_next: float | None = None
 
 
 def _rank_of_target(ranked_ids: list[str], target_id: str) -> int | None:
@@ -34,15 +36,18 @@ def _rank_of_target(ranked_ids: list[str], target_id: str) -> int | None:
     return None
 
 
-def _macro_f1(y_true: list[str], y_pred: list[str], labels: tuple[str, ...]) -> float:
+def _macro_f1(
+    y_true: list[str], y_pred: list[str | None], labels: tuple[str, ...]
+) -> float:
     tp: Counter[str] = Counter()
     fp: Counter[str] = Counter()
     fn: Counter[str] = Counter()
     for t, p in zip(y_true, y_pred, strict=True):
-        if t == p:
+        if p is not None and t == p:
             tp[t] += 1
         else:
-            fp[p] += 1
+            if p is not None:
+                fp[p] += 1
             fn[t] += 1
 
     f1s: list[float] = []
@@ -57,7 +62,7 @@ def _macro_f1(y_true: list[str], y_pred: list[str], labels: tuple[str, ...]) -> 
 def _score_subset(
     examples: list[SFTExample],
     predictions: list[PlannerPrediction],
-) -> dict[str, float | int]:
+) -> dict[str, float | int | None]:
     n = len(examples)
     if n == 0:
         return {"count": 0}
@@ -67,10 +72,17 @@ def _score_subset(
     mrr_sum = 0.0
     ndcg10_sum = 0.0
     overlap_abs_err = 0.0
+    valid_overlap_n = 0
     overlap_within_8 = 0
+    phrase_aligned_overlap = 0
+    cue_out_abs_err = 0.0
+    valid_cue_out_n = 0
+    cue_in_abs_err = 0.0
+    valid_cue_in_n = 0
     stretch_abs_err = 0.0
+    valid_stretch_n = 0
     style_true: list[str] = []
-    style_pred: list[str] = []
+    style_pred: list[str | None] = []
 
     for ex, pred in zip(examples, predictions, strict=True):
         rank = _rank_of_target(pred.ranked_track_ids, ex.target_track_id)
@@ -83,29 +95,63 @@ def _score_subset(
             if rank <= 10:
                 ndcg10_sum += 1.0 / math.log2(rank + 1.0)
 
-        err_ov = abs(pred.predicted_overlap_beats - ex.target_plan.overlap_beats)
-        overlap_abs_err += err_ov
-        if err_ov <= 8.0:
-            overlap_within_8 += 1
+        if pred.predicted_overlap_beats is not None:
+            err_ov = abs(pred.predicted_overlap_beats - ex.target_plan.overlap_beats)
+            overlap_abs_err += err_ov
+            valid_overlap_n += 1
+            if err_ov <= 8.0:
+                overlap_within_8 += 1
+            if pred.predicted_overlap_beats >= 7.0:
+                rem8 = pred.predicted_overlap_beats % 8.0
+                if min(rem8, 8.0 - rem8) <= 1.0:
+                    phrase_aligned_overlap += 1
 
-        stretch_abs_err += abs(
-            pred.predicted_tempo_stretch_pct - ex.target_plan.tempo_stretch_next_pct
-        )
+        if pred.predicted_cue_out_beat_prev is not None:
+            cue_out_abs_err += abs(
+                pred.predicted_cue_out_beat_prev - ex.target_plan.track_cue_out_beat_prev
+            )
+            valid_cue_out_n += 1
+
+        if rank == 1 and pred.predicted_cue_in_beat_next is not None:
+            cue_in_abs_err += abs(
+                pred.predicted_cue_in_beat_next - ex.target_plan.track_cue_in_beat_next
+            )
+            valid_cue_in_n += 1
+
+        if pred.predicted_tempo_stretch_pct is not None:
+            stretch_abs_err += abs(
+                pred.predicted_tempo_stretch_pct - ex.target_plan.tempo_stretch_next_pct
+            )
+            valid_stretch_n += 1
+
         style_true.append(ex.target_plan.transition_style)
         style_pred.append(pred.predicted_style)
 
-    style_acc = sum(1 for t, p in zip(style_true, style_pred, strict=True) if t == p) / n
+    style_acc = sum(
+        1 for t, p in zip(style_true, style_pred, strict=True) if p is not None and t == p
+    ) / n
     return {
         "count": n,
         "recall_at_1": round(r1 / n, 4),
         "recall_at_5": round(r5 / n, 4),
         "mrr": round(mrr_sum / n, 4),
         "ndcg_at_10": round(ndcg10_sum / n, 4),
-        "overlap_beats_mae": round(overlap_abs_err / n, 2),
+        "overlap_beats_mae": (
+            round(overlap_abs_err / valid_overlap_n, 2) if valid_overlap_n > 0 else None
+        ),
         "overlap_within_8_beats": round(overlap_within_8 / n, 4),
+        "phrase_aligned_overlap_rate": round(phrase_aligned_overlap / n, 4),
+        "cue_out_beat_mae": (
+            round(cue_out_abs_err / valid_cue_out_n, 2) if valid_cue_out_n > 0 else None
+        ),
+        "cue_in_beat_mae": (
+            round(cue_in_abs_err / valid_cue_in_n, 2) if valid_cue_in_n > 0 else None
+        ),
         "style_accuracy": round(style_acc, 4),
         "style_macro_f1": round(_macro_f1(style_true, style_pred, ALL_STYLES), 4),
-        "tempo_stretch_mae_pct": round(stretch_abs_err / n, 2),
+        "tempo_stretch_mae_pct": (
+            round(stretch_abs_err / valid_stretch_n, 2) if valid_stretch_n > 0 else None
+        ),
     }
 
 
