@@ -318,10 +318,12 @@ def render_transition(
 
     if abs(rate - 1.0) > 0.002 and 0.65 <= rate <= 1.50:
         stretched_b = _time_stretch_wsola(raw_b, sr, rate)
+        applied_rate = rate
     else:
         stretched_b = raw_b.astype(np.float32)
+        applied_rate = 1.0
 
-    lead_in_stretched = int(round(lead_in_orig / max(rate, 0.5)))
+    lead_in_stretched = int(round(lead_in_orig / max(applied_rate, 0.5)))
     base_b = _shift_signal(stretched_b, -lead_in_stretched, ov_n + post_n)
 
     # Post-stretch onset phase-lock (auto-aligns kicks to <15 ms unless defect shift is injected)
