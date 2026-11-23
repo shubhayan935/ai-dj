@@ -502,8 +502,12 @@ def build_cleaned_dataset(
 
             exclude = {rec.prev_track.track_id, rec.next_track.track_id, *hist_ids}
             anchor_bpm = rec.prev_track.bpm or 125.0
+            # Only bias distractors toward genre-tagged tracks when the target itself has
+            # train-observed genres; otherwise target vs. distractor genre availability
+            # becomes asymmetric on unseen val/test tracks.
+            distractor_genres = set_brief.genres if rec.next_track.genres else []
             distractors = sample_hard_distractors(
-                anchor_bpm, set_brief.genres, exclude, candidate_pool_size - 1, rng
+                anchor_bpm, distractor_genres, exclude, candidate_pool_size - 1, rng
             )
             candidates = [_to_candidate(rec.next_track)] + [_to_candidate(d) for d in distractors]
             rng.shuffle(candidates)
