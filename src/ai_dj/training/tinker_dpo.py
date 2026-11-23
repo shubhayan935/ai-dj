@@ -90,6 +90,25 @@ def _unwrap_tensor_values(val) -> list:
     return list(val)
 
 
+def _completion_mask_values(datum) -> list[float]:
+    """Return binary 0/1 completion mask so DPO sums response logprobs instead of averaging."""
+    weights = _unwrap_tensor_values(datum.loss_fn_inputs["weights"])
+    return [1.0 if float(w) > 0.0 else 0.0 for w in weights]
+
+
+def _resolve_dpo_model_name(training_client, fallback_model: str) -> str:
+    """Resolve the active base model name from a resumed Tinker training client when available."""
+    get_info = getattr(training_client, "get_info", None)
+    if callable(get_info):
+        info = get_info()
+        model_name = getattr(info, "model_name", None)
+        if not model_name and getattr(info, "model_data", None) is not None:
+            model_name = getattr(info.model_data, "model_name", None)
+        if model_name:
+            return str(model_name)
+    return fallback_model
+
+
 def _full_sequence_for_logprobs(datum):
     """Append the final target token to datum.model_input so compute_logprobs scores all targets."""
     targets = _unwrap_tensor_values(datum.loss_fn_inputs["target_tokens"])
@@ -177,8 +196,13 @@ def run_tinker_dpo(config: DPOConfig, *, dry_run: bool = False) -> dict:
     ref_sampler = training_client.save_weights_and_get_sampling_client(
         name=f"{config.save_name}-ref"
     ).result()
+    resolved_model = (
+        _resolve_dpo_model_name(training_client, config.base_model)
+        if config.sft_state_checkpoint
+        else config.base_model
+    )
     tokenizer, renderer = load_tokenizer_and_renderer(
-        config.base_model,
+        resolved_model,
         renderer_name=config.renderer_name,
         training_client=training_client,
     )
@@ -218,11 +242,11 @@ def run_tinker_dpo(config: DPOConfig, *, dry_run: bool = False) -> dict:
             ref_rejected = []
             for j in range(0, len(interleaved_datums), 2):
                 w_c = torch.tensor(
-                    _unwrap_tensor_values(interleaved_datums[j].loss_fn_inputs["weights"]),
+                    _completion_mask_values(interleaved_datums[j]),
                     dtype=torch.float32,
                 )
                 w_r = torch.tensor(
-                    _unwrap_tensor_values(interleaved_datums[j + 1].loss_fn_inputs["weights"]),
+                    _completion_mask_values(interleaved_datums[j + 1]),
                     dtype=torch.float32,
                 )
                 lp_c = torch.tensor(
@@ -239,11 +263,11 @@ def run_tinker_dpo(config: DPOConfig, *, dry_run: bool = False) -> dict:
                 rejected_lp = []
                 for j in range(0, len(data), 2):
                     w_c = torch.tensor(
-                        _unwrap_tensor_values(data[j].loss_fn_inputs["weights"]),
+                        _completion_mask_values(data[j]),
                         dtype=torch.float32,
                     )
                     w_r = torch.tensor(
-                        _unwrap_tensor_values(data[j + 1].loss_fn_inputs["weights"]),
+                        _completion_mask_values(data[j + 1]),
                         dtype=torch.float32,
                     )
                     chosen_lp.append((logprobs_list[j] * w_c).sum())

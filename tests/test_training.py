@@ -232,7 +232,12 @@ def test_review_regressions_token_extraction_truncation_dpo_and_invalid_eval(
     import math
     from types import SimpleNamespace
 
-    from ai_dj.training.tinker_dpo import _full_sequence_for_logprobs, _unwrap_tensor_values
+    from ai_dj.training.tinker_dpo import (
+        _completion_mask_values,
+        _full_sequence_for_logprobs,
+        _resolve_dpo_model_name,
+        _unwrap_tensor_values,
+    )
     from ai_dj.training.tinker_sft import _extract_token_ids
 
     # BUG 0002: BatchEncoding-style dict returns token IDs, not key names
@@ -268,6 +273,23 @@ def test_review_regressions_token_extraction_truncation_dpo_and_invalid_eval(
     assert _unwrap_tensor_values(fake_datum.loss_fn_inputs["weights"]) == [0.0, 1.0, 1.0]
     full_seq = _full_sequence_for_logprobs(fake_datum)
     assert full_seq.tokens == [100, 101, 102, 103]
+
+    # Normalized SFT weights (summing to 1.0) convert to binary 0/1 mask for DPO logprob sums
+    norm_datum = SimpleNamespace(
+        loss_fn_inputs={"weights": FakeTensorData([0.0, 0.25, 0.25, 0.5])}
+    )
+    assert _completion_mask_values(norm_datum) == [0.0, 1.0, 1.0, 1.0]
+
+    # Resumed DPO resolves base model name from checkpoint info instead of default
+    fake_client = SimpleNamespace(
+        get_info=lambda: SimpleNamespace(
+            model_name=None,
+            model_data=SimpleNamespace(model_name="Qwen/Qwen3.6-35B-A3B"),
+        )
+    )
+    assert _resolve_dpo_model_name(fake_client, "thinkingmachines/Inkling-2-Mini") == (
+        "Qwen/Qwen3.6-35B-A3B"
+    )
 
     # BUG 0006: Invalid non-JSON completions earn 0.0 style and within-8b credit
     ex = _make_sample_example("ex_bad")
