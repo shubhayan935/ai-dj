@@ -254,9 +254,11 @@ def _apply_beat_synced_echo_out(
     delay_beats: float = 0.75,
     hpf_hz: float = 380.0,
 ) -> np.ndarray:
-    """Club Pioneer-style beat-synced dotted-eighth echo-out right at `cut_frac`."""
+    """Club Pioneer-style beat-synced dotted-eighth echo-out quantized to the nearest beat."""
     n = sig.shape[1]
-    cut_idx = max(1, min(n - 1, int(round(cut_frac * n))))
+    beat_n = max(64, int(round(beat_dur_sec * sr)))
+    cut_beats = max(1, int(round((cut_frac * n) / float(beat_n))))
+    cut_idx = max(1, min(n - 1, cut_beats * beat_n))
     delay_n = max(64, int(round(delay_beats * beat_dur_sec * sr)))
     # Smooth 35 ms dry mute right on the downbeat cut
     mute_n = min(int(round(0.035 * sr)), n - cut_idx)
