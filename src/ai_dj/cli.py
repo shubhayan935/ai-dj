@@ -434,28 +434,52 @@ def train_grpo_cmd(
     out_dir: Annotated[Path, typer.Option()] = Path(
         "data/processed/training_v2/runs/inkling2_mini_grpo_v1"
     ),
-    base_model: Annotated[str, typer.Option()] = "thinkingmachines/Inkling-2-Mini",
+    base_model: Annotated[
+        str | None,
+        typer.Option(
+            help="Base model (defaults to Inkling-Small if --audio-native else Inkling-2-Mini)."
+        ),
+    ] = None,
     sft_state_checkpoint: Annotated[str | None, typer.Option()] = None,
     num_steps: Annotated[int, typer.Option()] = 20,
     prompts_per_step: Annotated[int, typer.Option()] = 4,
     group_size: Annotated[int, typer.Option(min=2)] = 4,
+    task_mode: Annotated[str, typer.Option(help="crate | pair | mixed")] = "crate",
+    audio_native: Annotated[
+        bool, typer.Option(help="Pass raw DmelChunk WAV cue clips (for Inkling-Small).")
+    ] = False,
+    clip_sec: Annotated[float, typer.Option(help="Cue WAV clip length in seconds")] = 4.0,
+    max_tokens: Annotated[int, typer.Option(help="Max completion tokens per rollout")] = 160,
     learning_rate: Annotated[float, typer.Option()] = 2e-5,
     save_name: Annotated[str, typer.Option()] = "ai-dj-inkling2-mini-grpo-v1",
     dry_run: Annotated[
         bool, typer.Option(help="Validate GRPO tasks & reward without Tinker.")
     ] = False,
 ) -> None:
-    """Phase 4: Run DSP-verified Tinker LoRA GRPO on verified electronic CC tracks."""
+    """Phase 4/5: Run DSP-verified Tinker LoRA GRPO on verified electronic CC tracks."""
     from ai_dj.rl.tinker_grpo import GRPOConfig, run_tinker_grpo
 
+    resolved_base = (
+        base_model
+        if base_model is not None
+        else (
+            "thinkingmachines/Inkling-Small"
+            if audio_native
+            else "thinkingmachines/Inkling-2-Mini"
+        )
+    )
     cfg = GRPOConfig(
         cards_jsonl=cards_jsonl,
         out_dir=out_dir,
-        base_model=base_model,
+        base_model=resolved_base,
         sft_state_checkpoint=sft_state_checkpoint,
         num_steps=num_steps,
         prompts_per_step=prompts_per_step,
         group_size=group_size,
+        task_mode=task_mode,  # type: ignore[arg-type]
+        audio_native=audio_native,
+        clip_sec=clip_sec,
+        max_tokens=max_tokens,
         learning_rate=learning_rate,
         save_name=save_name,
     )

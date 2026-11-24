@@ -6,6 +6,7 @@ import json
 import subprocess
 import tempfile
 from pathlib import Path
+from typing import Literal
 
 import librosa
 import numpy as np
@@ -27,6 +28,24 @@ _PITCH_CLASSES = ["C", "C#", "D", "Eb", "E", "F", "F#", "G", "Ab", "A", "Bb", "B
 # Camelot Wheel lookup: (pitch_class_index, is_major) -> Camelot code
 _MAJOR_CAMELOT = ["8B", "3B", "10B", "5B", "12B", "7B", "2B", "9B", "4B", "11B", "6B", "1B"]
 _MINOR_CAMELOT = ["5A", "12A", "7A", "2A", "9A", "4A", "11A", "6A", "1A", "8A", "3A", "10A"]
+
+
+SectionLabel = Literal["intro", "buildup", "drop", "breakdown", "groove", "outro"]
+
+
+class TrackSection(BaseModel):
+    """One phrase-aligned structural section of a full song."""
+
+    index: int
+    label: SectionLabel
+    start_beat: int
+    end_beat: int
+    start_sec: float
+    end_sec: float
+    energy: float
+    bass_density: float
+    vocal_ratio: float
+    percussion_ratio: float
 
 
 class AudioTrackCard(BaseModel):
@@ -54,6 +73,7 @@ class AudioTrackCard(BaseModel):
     timbre_embedding: list[float] = Field(default_factory=list)
     mean_energy: float = 0.0
     vocal_ratio: float = 0.0
+    sections: list[TrackSection] = Field(default_factory=list)
 
 
 def compute_timbre_embedding(y: np.ndarray, sr: int) -> list[float]:
@@ -294,6 +314,152 @@ def _find_best_cue_beat(
     return best_beat
 
 
+def segment_track_sections(
+    y: np.ndarray,
+    sr: int,
+    beat_times: list[float],
+    energy_curve: list[float],
+    vocal_mask: list[bool],
+    onset_env: np.ndarray | None = None,
+    onset_hop_length: int = 512,
+) -> list[TrackSection]:
+    """Segment a full track into phrase-aligned structural sections with musical features."""
+    n_beats = len(beat_times)
+    if n_beats < 32 or len(y) < sr * 4:
+        return []
+
+    # Low-band (<200 Hz) signal for per-section bass density & phrase-phase alignment
+    sos_low = butter(4, min(200.0, sr * 0.45) / (sr / 2.0), btype="low", output="sos")
+    y_low = sosfiltfilt(sos_low, y.astype(np.float64))
+
+    # Find the song's true bar-1 / 8-bar phrase phase offset using beat-sync energy novelty
+    # instead of slicing blindly at beat 0, 32, 64...
+    phrase_beats = 64 if n_beats >= 512 else 32
+    beat_rms = np.zeros(n_beats, dtype=np.float64)
+    beat_low = np.zeros(n_beats, dtype=np.float64)
+    for bi in range(n_beats - 1):
+        s0 = int(beat_times[bi] * sr)
+        s1 = min(len(y), int(beat_times[bi + 1] * sr))
+        if s1 > s0 + 16:
+            beat_rms[bi] = float(np.sqrt(np.mean(y[s0:s1].astype(np.float64) ** 2)))
+            beat_low[bi] = float(np.sqrt(np.mean(y_low[s0:s1] ** 2)))
+    win = 16
+    novelty = np.zeros(n_beats, dtype=np.float64)
+    for bi in range(win, n_beats - win):
+        d_rms = abs(float(np.mean(beat_rms[bi : bi + win]) - np.mean(beat_rms[bi - win : bi])))
+        d_low = abs(float(np.mean(beat_low[bi : bi + win]) - np.mean(beat_low[bi - win : bi])))
+        novelty[bi] = d_rms + 1.5 * d_low
+
+    best_phase = 0
+    best_phase_score = -1.0
+    for phase in range(min(32, max(1, n_beats // 4))):
+        pts = list(range(phase, n_beats, 32))
+        if len(pts) < 2:
+            continue
+        score = float(np.sum(novelty[pts]))
+        if score > best_phase_score:
+            best_phase_score = score
+            best_phase = phase
+
+    boundaries: list[int] = [0]
+    first_b = best_phase if best_phase >= 16 else (best_phase + 32)
+    cur = first_b
+    while cur < n_beats - 16:
+        # Snap to strongest novelty within ±1 beat of the 32/64-beat phrase grid
+        step = phrase_beats
+        if phrase_beats == 64 and cur + 32 < n_beats - 16:
+            # Allow a 32-beat phrase split when there is a major structural change halfway
+            mid_nov = float(novelty[cur + 32])
+            if mid_nov > float(np.percentile(novelty[win : n_beats - win], 82)):
+                step = 32
+        boundaries.append(cur)
+        cur += step
+    if len(boundaries) < 2:
+        boundaries = list(range(0, n_beats, phrase_beats))
+    if len(boundaries) < 2:
+        return []
+    # Merge short (<16 beat) trailing tails into the preceding final section
+    if (n_beats - 1) - boundaries[-1] < 16:
+        boundaries.pop()
+
+    if onset_env is None:
+        onset_env = librosa.onset.onset_strength(y=y, sr=sr, hop_length=onset_hop_length)
+    onset_times = librosa.frames_to_time(
+        np.arange(len(onset_env)), sr=sr, hop_length=onset_hop_length
+    )
+    onset_p90 = float(np.percentile(onset_env, 90)) if len(onset_env) else 1.0
+    onset_scale = max(onset_p90, 1e-6)
+
+    raw_secs: list[dict] = []
+    for i, b0 in enumerate(boundaries):
+        b1 = boundaries[i + 1] if i + 1 < len(boundaries) else n_beats - 1
+        if b1 - b0 < 16:
+            continue
+        t0 = float(beat_times[b0])
+        t1 = float(beat_times[b1])
+        s0, s1 = int(t0 * sr), min(len(y), int(t1 * sr))
+        if s1 <= s0 + 256:
+            continue
+        seg = y[s0:s1].astype(np.float64)
+        seg_low = y_low[s0:s1]
+        rms_all = float(np.sqrt(np.mean(seg**2))) + 1e-9
+        rms_low = float(np.sqrt(np.mean(seg_low**2)))
+        bass_density = round(min(1.0, rms_low / rms_all), 3)
+
+        sec_i0, sec_i1 = int(t0), max(int(t0) + 1, min(len(energy_curve), int(t1)))
+        e_slice = energy_curve[sec_i0:sec_i1]
+        energy = round(float(np.mean(e_slice)), 3) if e_slice else 0.0
+        v_slice = vocal_mask[sec_i0 : min(len(vocal_mask), sec_i1)]
+        v_ratio = round(float(np.mean(v_slice)), 3) if v_slice else 0.0
+
+        o_mask = (onset_times >= t0) & (onset_times < t1)
+        perc = (
+            round(min(1.0, float(np.mean(onset_env[o_mask])) / onset_scale), 3)
+            if np.any(o_mask)
+            else 0.0
+        )
+        raw_secs.append(
+            {
+                "start_beat": int(b0),
+                "end_beat": int(b1),
+                "start_sec": round(t0, 2),
+                "end_sec": round(t1, 2),
+                "energy": energy,
+                "bass_density": bass_density,
+                "vocal_ratio": v_ratio,
+                "percussion_ratio": perc,
+            }
+        )
+
+    if not raw_secs:
+        return []
+
+    energies = [s["energy"] for s in raw_secs]
+    med_e = float(np.median(energies))
+    hi_e = max(0.68, float(np.percentile(energies, 70)))
+    lo_e = min(0.50, med_e * 0.80)
+    n_s = len(raw_secs)
+
+    sections: list[TrackSection] = []
+    for idx, s in enumerate(raw_secs):
+        e = s["energy"]
+        next_e = raw_secs[idx + 1]["energy"] if idx + 1 < n_s else e
+        if idx == 0 or (idx == 1 and e < med_e * 0.90):
+            label: SectionLabel = "intro"
+        elif idx == n_s - 1 or (idx == n_s - 2 and e < med_e * 0.90):
+            label = "outro"
+        elif next_e - e >= 0.12 and next_e >= hi_e * 0.92:
+            label = "buildup"
+        elif e >= hi_e and s["bass_density"] >= 0.30:
+            label = "drop"
+        elif e <= lo_e:
+            label = "breakdown"
+        else:
+            label = "groove"
+        sections.append(TrackSection(index=idx, label=label, **s))
+    return sections
+
+
 def analyze_track(
     audio_path: Path,
     *,
@@ -304,18 +470,34 @@ def analyze_track(
     y = load_audio_mono(audio_path, sr=sr)
     duration_sec = round(len(y) / float(sr), 3)
 
-    onset_env = librosa.onset.onset_strength(y=y, sr=sr)
+    hop_length = 256
+    onset_env = librosa.onset.onset_strength(y=y, sr=sr, hop_length=hop_length)
     tempo, beat_frames = librosa.beat.beat_track(
-        onset_envelope=onset_env, sr=sr, start_bpm=122.0, tightness=120.0
+        onset_envelope=onset_env,
+        sr=sr,
+        hop_length=hop_length,
+        start_bpm=122.0,
+        tightness=120.0,
     )
     bpm = float(np.asarray(tempo).reshape(-1)[0])
-    beat_times = [round(float(t), 4) for t in librosa.frames_to_time(beat_frames, sr=sr)]
+    beat_times = [
+        round(float(t), 4)
+        for t in librosa.frames_to_time(beat_frames, sr=sr, hop_length=hop_length)
+    ]
 
     if len(beat_times) >= 4:
-        ibis = np.diff(np.array(beat_times, dtype=np.float64))
-        med = float(np.median(ibis))
-        bpm = round(60.0 / med, 2) if med > 0 else round(bpm, 2)
-        bpm_stability = round(float(np.mean(np.abs(ibis - med) / max(med, 1e-6) < 0.08)), 4)
+        bt_arr = np.array(beat_times, dtype=np.float64)
+        ibis = np.diff(bt_arr)
+        med_ibi = float(np.median(ibis))
+        bpm_stability = round(
+            float(np.mean(np.abs(ibis - med_ibi) / max(med_ibi, 1e-6) < 0.08)), 4
+        )
+        # Multi-beat span median eliminates integer-frame IBI quantization (<0.05 BPM accuracy)
+        span = min(32, max(1, len(bt_arr) // 3))
+        span_ibis = (bt_arr[span:] - bt_arr[:-span]) / float(span)
+        valid_spans = span_ibis[np.abs(span_ibis - med_ibi) / max(med_ibi, 1e-6) < 0.06]
+        precise_ibi = float(np.median(valid_spans)) if valid_spans.size else med_ibi
+        bpm = round(60.0 / precise_ibi, 2) if precise_ibi > 0 else round(bpm, 2)
     else:
         bpm = round(bpm, 2)
         bpm_stability = 0.0
@@ -348,6 +530,15 @@ def analyze_track(
     timbre_emb = compute_timbre_embedding(y, sr)
     mean_energy = round(float(np.mean(energy_curve)), 4) if energy_curve else 0.0
     vocal_ratio = round(float(np.mean(vocal_mask)), 4) if vocal_mask else 0.0
+    sections = segment_track_sections(
+        y,
+        sr,
+        beat_times,
+        energy_curve,
+        vocal_mask,
+        onset_env=onset_env,
+        onset_hop_length=hop_length,
+    )
 
     return AudioTrackCard(
         track_id=track_id or audio_path.stem,
@@ -371,6 +562,7 @@ def analyze_track(
         timbre_embedding=timbre_emb,
         mean_energy=mean_energy,
         vocal_ratio=vocal_ratio,
+        sections=sections,
     )
 
 

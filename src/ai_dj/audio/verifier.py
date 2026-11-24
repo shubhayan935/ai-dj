@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field
 from scipy.signal import butter, sosfiltfilt
 
 from ai_dj.audio.analyzer import AudioTrackCard, camelot_distance, estimate_vocal_activity_mask
+from ai_dj.audio.critic import PsychoacousticCritique, evaluate_transition_psychoacoustics
 from ai_dj.audio.renderer import RenderResult, RenderSpec
 
 
@@ -21,6 +22,8 @@ class QAThresholds(BaseModel):
     max_peak_dbfs: float = -0.15
     max_clipped_samples: int = 8
     max_low_band_excess_db: float = 1.6
+    max_drum_clash_ratio: float = 1.38
+    max_step_rms_db: float = 4.5
     max_tempo_stretch_pct: float = 8.0
 
 
@@ -42,9 +45,14 @@ class TransitionQAReport(BaseModel):
     has_clipping: bool
     low_band_excess_db: float
     has_bass_clash: bool
+    drum_clash_ratio: float = 1.0
+    has_drum_clash: bool = False
+    max_step_rms_db: float = 0.0
+    has_sudden_jump: bool = False
     tempo_stretch_pct: float
     excessive_stretch: bool
     camelot_dist: int
+    psychoacoustic: PsychoacousticCritique | None = None
     defects_detected: list[str] = Field(default_factory=list)
     passed: bool
     verifiable_reward: float
@@ -63,16 +71,20 @@ def _region_lufs(y: np.ndarray, sr: int) -> float:
     return round(20.0 * np.log10(rms), 2)
 
 
-def _measure_beat_drift_ms(
-    stem_a: np.ndarray,
-    stem_b: np.ndarray,
-    sr: int,
-    bpm: float,
+def _lowpass_kick_band(sig: np.ndarray, sr: int) -> np.ndarray | None:
+    """Return <160 Hz kick signal if it carries meaningful energy, else None."""
+    if len(sig) < 256:
+        return None
+    sos = butter(4, min(160.0 / (0.5 * sr), 0.9), btype="lowpass", output="sos")
+    low = sosfiltfilt(sos, sig.astype(np.float64)).astype(np.float32)
+    return low if float(np.sqrt(np.mean(low**2))) >= 1e-4 else None
+
+
+def _corr_lag_ms(
+    sig_a: np.ndarray, sig_b: np.ndarray, sr: int, bpm: float, hop: int = 256
 ) -> float:
-    """Measure beat/onset phase offset (ms) between Track A and Track B inside the overlap."""
-    hop = 256
-    env_a = librosa.onset.onset_strength(y=stem_a, sr=sr, hop_length=hop)
-    env_b = librosa.onset.onset_strength(y=stem_b, sr=sr, hop_length=hop)
+    env_a = librosa.onset.onset_strength(y=sig_a, sr=sr, hop_length=hop)
+    env_b = librosa.onset.onset_strength(y=sig_b, sr=sr, hop_length=hop)
     n = min(len(env_a), len(env_b))
     if n < 16:
         return 0.0
@@ -82,9 +94,8 @@ def _measure_beat_drift_ms(
     if denom < 1e-8:
         return 0.0
 
-    # Search lag within +/- half a beat period
     half_beat_sec = 0.5 * (60.0 / max(bpm, 60.0))
-    max_lag_frames = max(2, int(round(half_beat_sec * sr / hop)))
+    max_lag_frames = min(max(2, int(round(half_beat_sec * sr / hop))), n // 3)
     best_lag = 0
     best_corr = -1e9
     for lag in range(-max_lag_frames, max_lag_frames + 1):
@@ -92,12 +103,48 @@ def _measure_beat_drift_ms(
             corr = float(np.dot(a[lag:], b[: n - lag]))
         else:
             corr = float(np.dot(a[: n + lag], b[-lag:]))
-        if corr > best_corr:
-            best_corr = corr
+        # Mild proximity prior so an ambiguous offbeat/syncopation in a short window
+        # does not jump to +-half-beat when downbeats are locked
+        prior = 1.0 - 0.12 * (abs(lag) / float(max_lag_frames))
+        score = corr * prior
+        if score > best_corr:
+            best_corr = score
             best_lag = lag
+    return abs(best_lag) * (hop / float(sr)) * 1000.0
 
-    drift_ms = abs(best_lag) * (hop / float(sr)) * 1000.0
-    return round(drift_ms, 2)
+
+def _measure_beat_drift_ms(
+    stem_a: np.ndarray,
+    stem_b: np.ndarray,
+    sr: int,
+    bpm: float,
+) -> float:
+    """Measure <160 Hz kick phase/drift offset (ms) across global and sliding 2.5s windows."""
+    hop = 256 if sr <= 24000 else 512
+    low_a = _lowpass_kick_band(stem_a, sr)
+    low_b = _lowpass_kick_band(stem_b, sr)
+    if low_a is not None and low_b is not None:
+        sa, sb = low_a, low_b
+    else:
+        sa, sb = stem_a, stem_b
+
+    global_ms = _corr_lag_ms(sa, sb, sr, bpm, hop=hop)
+
+    # Also check sliding 2.5s windows so linear tempo drift is never hidden by midpoint lock
+    n_tot = min(len(sa), len(sb))
+    win_n = int(round(2.5 * sr))
+    step_n = int(round(1.5 * sr))
+    win_lags: list[float] = []
+    if n_tot >= win_n + step_n:
+        for s0 in range(0, n_tot - win_n + 1, step_n):
+            wa, wb = sa[s0 : s0 + win_n], sb[s0 : s0 + win_n]
+            if float(np.sqrt(np.mean(wa**2))) < 1e-4 or float(np.sqrt(np.mean(wb**2))) < 1e-4:
+                continue
+            win_lags.append(_corr_lag_ms(wa, wb, sr, bpm, hop=hop))
+    if win_lags:
+        p75_win_ms = float(np.percentile(win_lags, 75))
+        return round(max(global_ms, p75_win_ms), 2)
+    return round(global_ms, 2)
 
 
 def _low_band_rms_db(y: np.ndarray, sr: int, cutoff_hz: float = 250.0) -> float:
@@ -116,6 +163,7 @@ def verify_transition(
     spec: RenderSpec,
     *,
     thresholds: QAThresholds | None = None,
+    include_psychoacoustic: bool = False,
 ) -> TransitionQAReport:
     """Run deterministic technical QA checks on a rendered transition."""
     cfg = thresholds or QAThresholds()
@@ -136,13 +184,34 @@ def verify_transition(
     )
     beat_aligned = beat_drift_ms <= cfg.max_beat_drift_ms
 
-    # 2. Phrase-grid alignment (bar/2-bar boundary)
-    phrase_aligned = (spec.cue_out_beat_a % 8 == 0) and (spec.cue_in_beat_b % 8 == 0)
+    # 2. Phrase-grid alignment: aligned to the track's detected bar-1 phrase phase (or % 8)
+    def _is_phrase_aligned(card: AudioTrackCard, cue_beat: int) -> bool:
+        if card.sections:
+            # Check exact hit on any detected phrase boundary, or same 8-beat phrase phase
+            for sec in card.sections:
+                if cue_beat == sec.start_beat:
+                    return True
+            phase = card.sections[1].start_beat % 8 if len(card.sections) > 1 else 0
+            return ((cue_beat - phase) % 8) == 0
+        return (cue_beat % 8) == 0
+
+    phrase_aligned = _is_phrase_aligned(card_a, spec.cue_out_beat_a) and _is_phrase_aligned(
+        card_b, spec.cue_in_beat_b
+    )
 
     # 3. Vocal-on-vocal clash ratio during overlap (0.5s frame resolution)
-    stem_a_v = render.track_a_overlap_stem
-    stem_b_v = render.track_b_overlap_stem
-    if spec.transition_style == "quick_cut" and card_a.bpm > 0:
+    stem_a_v = (
+        render.rendered_a_overlap_stem
+        if render.rendered_a_overlap_stem is not None
+        else render.track_a_overlap_stem
+    )
+    stem_b_v = (
+        render.rendered_b_overlap_stem
+        if render.rendered_b_overlap_stem is not None
+        else render.track_b_overlap_stem
+    )
+    is_quick_cut = spec.transition_style == "quick_cut" and spec.dsl_program is None
+    if is_quick_cut and card_a.bpm > 0:
         cut_n = min(
             len(stem_a_v), len(stem_b_v), max(256, int(round(2.0 * (60.0 / card_a.bpm) * sr)))
         )
@@ -179,9 +248,59 @@ def verify_transition(
     low_band_excess_db = round(low_ov - low_ref, 2)
     has_bass_clash = low_band_excess_db > cfg.max_low_band_excess_db
 
+    # 6b. Dual-drum / transient clash ratio (onset flux in overlap vs max of solo pre/post)
+    def _mean_onset(sig: np.ndarray) -> float:
+        m = np.mean(sig, axis=0) if sig.ndim == 2 else sig
+        if len(m) < 1024:
+            return 0.0
+        return float(np.mean(librosa.onset.onset_strength(y=m.astype(np.float32), sr=sr)))
+
+    ons_pre = _mean_onset(pre_seg)
+    ons_post = _mean_onset(post_seg)
+    ons_a_ov = _mean_onset(render.track_a_overlap_stem)
+    ons_b_ov = _mean_onset(render.track_b_overlap_stem)
+    ons_ov = _mean_onset(ov_seg)
+    ons_ref = max(ons_pre, ons_post, ons_a_ov, ons_b_ov, 1e-6)
+    drum_clash_ratio = round(ons_ov / ons_ref, 3)
+    has_drum_clash = (not is_quick_cut) and drum_clash_ratio > cfg.max_drum_clash_ratio
+
+    # 6c. Local 0.5s stereo-energy loudness discontinuity inside overlap (catches sudden cuts/jumps)
+    n_tot = raw_mix.shape[-1]
+    win_n = max(512, int(0.5 * sr))
+    step_start = max(0, s0 - win_n)
+    step_end = min(n_tot, s1 + win_n)
+    ov_region = raw_mix[..., step_start:step_end]
+    rms_steps: list[float] = []
+    for pos in range(0, max(0, ov_region.shape[-1] - win_n + 1), win_n):
+        seg_w = ov_region[..., pos : pos + win_n]
+        rms_steps.append(20.0 * float(np.log10(np.sqrt(np.mean(seg_w**2)) + 1e-9)))
+    max_step_rms_db = (
+        round(max(abs(rms_steps[i] - rms_steps[i - 1]) for i in range(1, len(rms_steps))), 2)
+        if len(rms_steps) >= 2
+        else 0.0
+    )
+    has_sudden_jump = (not is_quick_cut) and max_step_rms_db > cfg.max_step_rms_db
+
     # 7. Tempo stretch & harmonic compatibility
     excessive_stretch = render.tempo_stretch_pct > cfg.max_tempo_stretch_pct
     c_dist = camelot_distance(card_a.camelot, card_b.camelot)
+
+    # 7b. Psychoacoustic Mix Critic (Plomp-Levelt, cross-chroma, peak dual-drum, Bark masking)
+    psycho: PsychoacousticCritique | None = None
+    if include_psychoacoustic or render.rendered_a_drums is not None:
+        psycho = evaluate_transition_psychoacoustics(
+            ov_seg,
+            stem_a_v,
+            stem_b_v,
+            sr,
+            overlap_start_sec=s0 / float(sr),
+            rendered_a_drums=render.rendered_a_drums,
+            rendered_b_drums=render.rendered_b_drums,
+            rendered_a_harm=render.rendered_a_harm,
+            rendered_b_harm=render.rendered_b_harm,
+            solo_a_ref=pre_seg,
+            solo_b_ref=post_seg,
+        )
 
     defects: list[str] = []
     if not beat_aligned:
@@ -194,8 +313,16 @@ def verify_transition(
         defects.append("clipping")
     if has_bass_clash:
         defects.append("bass_clash")
+    if has_drum_clash:
+        defects.append("drum_clash")
+    if has_sudden_jump:
+        defects.append("sudden_jump")
     if excessive_stretch:
         defects.append("excessive_stretch")
+    if psycho is not None:
+        for issue in psycho.issues:
+            if issue in ("harmonic_clash", "dual_drum_overlap") and issue not in defects:
+                defects.append(issue)
 
     # Verifiable 0..1 RL reward (hard-gated on technical defects)
     reward = 1.0
@@ -209,10 +336,19 @@ def verify_transition(
         reward -= 0.25
     if has_bass_clash:
         reward -= 0.20
+    if has_drum_clash:
+        reward -= 0.15
+    if has_sudden_jump:
+        reward -= 0.20
     if not phrase_aligned:
         reward -= 0.10
     if excessive_stretch:
         reward -= 0.20
+    if psycho is not None:
+        if "harmonic_clash" in psycho.issues:
+            reward -= 0.20
+        if "dual_drum_overlap" in psycho.issues:
+            reward -= 0.20
     # Smooth bonus/penalty for harmonic proximity
     if c_dist > 2:
         reward -= min(0.10, 0.02 * (c_dist - 2))
@@ -234,9 +370,14 @@ def verify_transition(
         has_clipping=has_clipping,
         low_band_excess_db=low_band_excess_db,
         has_bass_clash=has_bass_clash,
+        drum_clash_ratio=drum_clash_ratio,
+        has_drum_clash=has_drum_clash,
+        max_step_rms_db=max_step_rms_db,
+        has_sudden_jump=has_sudden_jump,
         tempo_stretch_pct=render.tempo_stretch_pct,
         excessive_stretch=excessive_stretch,
         camelot_dist=c_dist,
+        psychoacoustic=psycho,
         defects_detected=defects,
         passed=len(defects) == 0,
         verifiable_reward=reward,

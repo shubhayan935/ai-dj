@@ -7,10 +7,18 @@ from pathlib import Path
 
 import numpy as np
 
-from ai_dj.audio.analyzer import AudioTrackCard, timbre_cosine_similarity
+from ai_dj.audio.analyzer import (
+    AudioTrackCard,
+    TrackSection,
+    segment_track_sections,
+    timbre_cosine_similarity,
+)
+from ai_dj.rl.audio_native import build_audio_native_messages
 from ai_dj.rl.grpo_env import (
     build_audio_grpo_tasks,
+    build_pair_mix_tasks,
     format_audio_grpo_prompt,
+    format_section_timeline,
     parse_creative_plan,
     score_creative_plan,
 )
@@ -119,3 +127,65 @@ def test_grpo_tasks_reward_and_dry_run(tmp_path: Path) -> None:
     )
     assert res["mode"] == "dry_run"
     assert res["club_stable_tracks"] == 4
+
+
+def test_phase5_sections_pair_tasks_and_audio_native_messages(tmp_path: Path) -> None:
+    import soundfile as sf
+
+    sr = 16000
+    t = np.linspace(0.0, 20.0, sr * 20, endpoint=False, dtype=np.float32)
+    y = 0.25 * np.sin(2.0 * np.pi * 100.0 * t)
+    beats = [round(i * 0.5, 4) for i in range(40)]  # 120 BPM
+    energy = [0.2] * 5 + [0.8] * 10 + [0.3] * 5
+    vocals = [False] * 10 + [True] * 5 + [False] * 5
+    secs = segment_track_sections(y, sr, beats, energy, vocals)
+    assert len(secs) >= 1
+    assert isinstance(secs[0], TrackSection)
+    assert secs[0].label == "intro"
+    assert secs[-1].end_beat == len(beats) - 1
+
+    c1 = _fake_card("p1", 128.0, "8A", 10, tmp_path)
+    c2 = _fake_card("p2", 128.0, "8A", 10, tmp_path)
+    sf.write(c1.audio_path, y, sr)
+    sf.write(c2.audio_path, y, sr)
+    c1.sections = [
+        TrackSection(
+            index=0,
+            label="intro",
+            start_beat=0,
+            end_beat=64,
+            start_sec=0.0,
+            end_sec=30.0,
+            energy=0.3,
+            bass_density=0.2,
+            vocal_ratio=0.0,
+            percussion_ratio=0.4,
+        ),
+        TrackSection(
+            index=1,
+            label="outro",
+            start_beat=64,
+            end_beat=128,
+            start_sec=10.0,
+            end_sec=20.0,
+            energy=0.35,
+            bass_density=0.25,
+            vocal_ratio=0.0,
+            percussion_ratio=0.3,
+        ),
+    ]
+    c2.sections = list(c1.sections)
+    tl = format_section_timeline(c1)
+    assert "S0:intro@b0-64" in tl and "S1:outro@b64-128" in tl
+    from ai_dj.rl.grpo_env import _section_at_beat
+
+    boundary_sec = _section_at_beat(c1, 64)
+    assert boundary_sec is not None and boundary_sec.label == "outro"
+
+    pair_tasks = build_pair_mix_tasks([c1, c2], num_tasks=2, seed=42)
+    assert len(pair_tasks) == 2
+    assert len(pair_tasks[0].candidates) == 1
+    msgs, clips = build_audio_native_messages(pair_tasks[0], clip_sec=2.0, sr=sr)
+    assert len(msgs) == 2 and msgs[1]["role"] == "user"
+    audio_parts = [p for p in msgs[1]["content"] if p.get("type") == "input_audio"]
+    assert len(audio_parts) == len(clips) and len(clips) >= 2
