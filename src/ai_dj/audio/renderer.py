@@ -427,7 +427,15 @@ def render_transition(
             # 2) Snap-switch from Track A drums -> Track B drums on the exact downbeat
             #    with a 30ms click-free micro-fade (zero dual-kit stacking).
             ov_len = ov_a.shape[-1]
-            swap_idx = int(round(spec.bass_swap_beat_frac * ov_len))
+            # Quantize drum handoff to the nearest whole beat so it never cuts mid-beat
+            swap_beat = max(
+                1,
+                min(
+                    max(1, spec.overlap_beats - 1),
+                    int(round(spec.bass_swap_beat_frac * spec.overlap_beats)),
+                ),
+            )
+            swap_idx = min(ov_len - 1, max(1, int(round(swap_beat * beat_dur_a * sr))))
             declick_n = max(64, int(round(0.030 * sr)))  # 30ms click-free switch
             s_snap = np.zeros(ov_len, dtype=np.float64)
             sw0 = max(0, swap_idx - declick_n // 2)
@@ -436,17 +444,25 @@ def render_transition(
                 s_snap[sw0:sw1] = _smoothstep(np.linspace(0.0, 1.0, sw1 - sw0, dtype=np.float64))
             s_snap[sw1:] = 1.0
 
-            # Gentle HPF thinning on Track A drums during the 4 beats before the downbeat switch
+            # Gentle HPF thinning on Track A drums over the 4 beats leading through sw1
+            # with a smooth wet/dry fade-in at seg_start so boundaries never click
             pre_beats_n = min(swap_idx, max(1, int(round(4.0 * beat_dur_a * sr))))
+            seg_start = max(0, swap_idx - pre_beats_n)
+            seg_end = sw1
             drums_a_shaped = stems_a["drums"].copy()
-            if pre_beats_n >= 512 and swap_idx > pre_beats_n:
-                seg_start = swap_idx - pre_beats_n
-                drums_a_shaped[..., seg_start:swap_idx] = _apply_filter_sweep(
-                    stems_a["drums"][..., seg_start:swap_idx],
+            if seg_end - seg_start >= 512:
+                dry_seg = stems_a["drums"][..., seg_start:seg_end]
+                wet_seg = _apply_filter_sweep(
+                    dry_seg,
                     sr,
                     btype="highpass",
                     start_hz=35.0,
                     end_hz=420.0,
+                ).astype(np.float32)
+                seg_t = np.linspace(0.0, 1.0, seg_end - seg_start, dtype=np.float64)
+                wet_in = _smoothstep(seg_t / 0.12)
+                drums_a_shaped[..., seg_start:seg_end] = (
+                    dry_seg * (1.0 - wet_in) + wet_seg * wet_in
                 ).astype(np.float32)
 
             g_a_drums = 1.0 - s_snap
