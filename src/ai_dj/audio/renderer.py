@@ -256,6 +256,7 @@ def render_transition(
     stereo: bool = True,
     y_a: np.ndarray | None = None,
     y_b: np.ndarray | None = None,
+    use_demucs: bool = False,
 ) -> RenderResult:
     """Render a beatmatched, phase-locked, loudness-matched DJ transition from Track A to B."""
     if y_a is not None:
@@ -383,27 +384,52 @@ def render_transition(
         b_mh = b_mh_filt * (1.0 - dry_b) + b_mh_dry * dry_b
         g_a_mh = np.cos(0.5 * np.pi * _smoothstep((t - 0.15) / 0.85))
         g_b_mh = np.sin(0.5 * np.pi * _smoothstep(t / 0.80))
-        ov_mix = (
-            low_a * gain_a_low + low_b * gain_b_low + a_mh * g_a_mh + b_mh * g_b_mh
-        ).astype(np.float32)
+        ov_mix = (low_a * gain_a_low + low_b * gain_b_low + a_mh * g_a_mh + b_mh * g_b_mh).astype(
+            np.float32
+        )
 
     elif spec.transition_style == "stem_strip_blend":
-        # HPSS element stripping: strip Track A's melody early while keeping its drum groove
-        # locked under Track B's incoming melody, then swap bass & drums cleanly
-        a_harm = np.vstack([librosa.effects.harmonic(ch) for ch in ov_a])
-        a_perc = ov_a - a_harm
-        b_harm = np.vstack([librosa.effects.harmonic(ch) for ch in ov_b])
-        b_perc = ov_b - b_harm
-        # Strip A's harmonic layer in the first 45%, bring B's harmonic in over 15%..75%
-        g_a_harm = np.cos(0.5 * np.pi * _smoothstep(t / 0.45))
-        g_b_harm = np.sin(0.5 * np.pi * _smoothstep((t - 0.10) / 0.60))
-        # Swap percussion grooves around the bass-swap point
-        g_a_perc = np.cos(0.5 * np.pi * _smoothstep((t - 0.30) / 0.55))
-        g_b_perc = np.sin(0.5 * np.pi * _smoothstep((t - 0.15) / 0.55))
-        # Re-enforce clean low-band bass-swap so kicks never double-sum
-        raw_blend = a_harm * g_a_harm + b_harm * g_b_harm + a_perc * g_a_perc + b_perc * g_b_perc
-        _, mid_m, high_m = split_three_band(raw_blend, sr)
-        ov_mix = (low_a * gain_a_low + low_b * gain_b_low + mid_m + high_m).astype(np.float32)
+        # True 4-stem mixing (Demucs) or fast HPSS single-kit drum+bass swap:
+        # Bring in Track B's harmonic/synth layer over Track A's drums+bass,
+        # then swap drums+bass cleanly at `s_swap` so only ONE drum kit plays at a time.
+        if use_demucs:
+            from ai_dj.audio.stems import separate_four_stems
+
+            stems_a = separate_four_stems(ov_a, sr)
+            stems_b = separate_four_stems(ov_b, sr)
+            g_a_voc = np.cos(0.5 * np.pi * _smoothstep(t / 0.35))
+            g_b_voc = np.sin(
+                0.5 * np.pi * _smoothstep((t - max(0.0, spec.bass_swap_beat_frac - 0.05)) / 0.25)
+            )
+            g_a_oth = np.cos(0.5 * np.pi * _smoothstep((t - 0.10) / 0.85))
+            g_b_oth = np.sin(0.5 * np.pi * _smoothstep(t / 0.55))
+            # Only ONE track's drums + bass play at any instant (tight 2-beat swap at s_swap)
+            g_a_rhythm = np.cos(0.5 * np.pi * s_swap)
+            g_b_rhythm = np.sin(0.5 * np.pi * s_swap)
+            ov_mix = (
+                (stems_a["drums"] + stems_a["bass"]) * g_a_rhythm
+                + (stems_b["drums"] + stems_b["bass"]) * g_b_rhythm
+                + stems_a["vocals"] * g_a_voc
+                + stems_b["vocals"] * g_b_voc
+                + stems_a["other"] * g_a_oth
+                + stems_b["other"] * g_b_oth
+            ).astype(np.float32)
+        else:
+            a_harm = np.vstack([librosa.effects.harmonic(ch) for ch in ov_a])
+            a_perc = ov_a - a_harm
+            b_harm = np.vstack([librosa.effects.harmonic(ch) for ch in ov_b])
+            b_perc = ov_b - b_harm
+            # Strip A's harmonic layer early, bring B's harmonic in over 0%..60%
+            g_a_harm = np.cos(0.5 * np.pi * _smoothstep(t / 0.50))
+            g_b_harm = np.sin(0.5 * np.pi * _smoothstep((t - 0.05) / 0.55))
+            # Tight single-kit drum swap at s_swap so two drum kits never clash
+            g_a_perc = np.cos(0.5 * np.pi * s_swap)
+            g_b_perc = np.sin(0.5 * np.pi * s_swap)
+            raw_blend = (
+                a_harm * g_a_harm + b_harm * g_b_harm + a_perc * g_a_perc + b_perc * g_b_perc
+            )
+            _, mid_m, high_m = split_three_band(raw_blend, sr)
+            ov_mix = (low_a * gain_a_low + low_b * gain_b_low + mid_m + high_m).astype(np.float32)
 
     elif spec.transition_style == "long_blend":
         # DAFx-2022 club 3-band EQ weave: highs enter early -> mids cross -> bass swap -> highs out

@@ -672,7 +672,15 @@ def mix_song_pair(
     if not wav_path.is_relative_to(out_root):
         raise ValueError(f"Unsafe output path for pair WAV: {wav_path}")
 
-    render_res = render_transition(card_a, card_b, spec, out_wav=wav_path, sr=sr, stereo=True)
+    render_res = render_transition(
+        card_a,
+        card_b,
+        spec,
+        out_wav=wav_path,
+        sr=sr,
+        stereo=True,
+        use_demucs=(spec.transition_style == "stem_strip_blend"),
+    )
     qa = verify_transition(render_res, card_a, card_b, spec)
     from ai_dj.rl.grpo_env import _section_at_beat
 

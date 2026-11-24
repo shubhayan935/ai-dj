@@ -21,6 +21,7 @@ class QAThresholds(BaseModel):
     max_peak_dbfs: float = -0.15
     max_clipped_samples: int = 8
     max_low_band_excess_db: float = 1.6
+    max_drum_clash_ratio: float = 1.38
     max_tempo_stretch_pct: float = 8.0
 
 
@@ -42,6 +43,8 @@ class TransitionQAReport(BaseModel):
     has_clipping: bool
     low_band_excess_db: float
     has_bass_clash: bool
+    drum_clash_ratio: float = 1.0
+    has_drum_clash: bool = False
     tempo_stretch_pct: float
     excessive_stretch: bool
     camelot_dist: int
@@ -179,6 +182,22 @@ def verify_transition(
     low_band_excess_db = round(low_ov - low_ref, 2)
     has_bass_clash = low_band_excess_db > cfg.max_low_band_excess_db
 
+    # 6b. Dual-drum / transient clash ratio (onset flux in overlap vs max of solo pre/post)
+    def _mean_onset(sig: np.ndarray) -> float:
+        m = np.mean(sig, axis=0) if sig.ndim == 2 else sig
+        if len(m) < 1024:
+            return 0.0
+        return float(np.mean(librosa.onset.onset_strength(y=m.astype(np.float32), sr=sr)))
+
+    ons_pre = _mean_onset(pre_seg)
+    ons_post = _mean_onset(post_seg)
+    ons_ov = _mean_onset(ov_seg)
+    ons_ref = max(ons_pre, ons_post, 1e-6)
+    drum_clash_ratio = round(ons_ov / ons_ref, 3)
+    has_drum_clash = (
+        spec.transition_style != "quick_cut" and drum_clash_ratio > cfg.max_drum_clash_ratio
+    )
+
     # 7. Tempo stretch & harmonic compatibility
     excessive_stretch = render.tempo_stretch_pct > cfg.max_tempo_stretch_pct
     c_dist = camelot_distance(card_a.camelot, card_b.camelot)
@@ -194,6 +213,8 @@ def verify_transition(
         defects.append("clipping")
     if has_bass_clash:
         defects.append("bass_clash")
+    if has_drum_clash:
+        defects.append("drum_clash")
     if excessive_stretch:
         defects.append("excessive_stretch")
 
@@ -209,6 +230,8 @@ def verify_transition(
         reward -= 0.25
     if has_bass_clash:
         reward -= 0.20
+    if has_drum_clash:
+        reward -= 0.15
     if not phrase_aligned:
         reward -= 0.10
     if excessive_stretch:
@@ -234,6 +257,8 @@ def verify_transition(
         has_clipping=has_clipping,
         low_band_excess_db=low_band_excess_db,
         has_bass_clash=has_bass_clash,
+        drum_clash_ratio=drum_clash_ratio,
+        has_drum_clash=has_drum_clash,
         tempo_stretch_pct=render.tempo_stretch_pct,
         excessive_stretch=excessive_stretch,
         camelot_dist=c_dist,

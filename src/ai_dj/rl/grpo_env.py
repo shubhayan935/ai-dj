@@ -400,32 +400,47 @@ def _creative_technique_fit(
     e_a = sec_a.energy if sec_a is not None else deck_a.mean_energy
     e_b = sec_b.energy if sec_b is not None else deck_b.mean_energy
     high_vocals = max(voc_a, voc_b) >= 0.35
+    perc_a = sec_a.percussion_ratio if sec_a is not None else 0.5
+    perc_b = sec_b.percussion_ratio if sec_b is not None else 0.5
+    distinct_drums = timbre_sim < 0.88 or (perc_a >= 0.45 and perc_b >= 0.45)
     energy_gap = abs(e_a - e_b)
     style = plan.transition_style
 
     if style == "quick_cut":
         if stretch_pct_abs > 5.0 or cam_dist >= 4:
             return 1.0
-        return 0.45 if plan.overlap_beats <= 16 else 0.25
+        return 0.30 if plan.overlap_beats <= 16 else 0.15
     if style == "stem_strip_blend":
-        if high_vocals or (sec_a is not None and sec_a.label in ("drop", "groove")):
+        if plan.overlap_beats < 24:
+            return 0.30
+        if (
+            high_vocals
+            or distinct_drums
+            or (sec_a is not None and sec_a.label in ("drop", "groove"))
+        ):
             return 1.0
-        return 0.75
+        return 0.85
     if style == "filter_sweep":
+        if plan.overlap_beats < 24:
+            return 0.30
         if energy_gap >= 0.12 or cam_dist in (1, 2):
             return 1.0
         return 0.80
     if style == "bass_swap":
-        if stretch_pct_abs <= 4.5 and not high_vocals and plan.overlap_beats in (16, 24, 32, 48):
-            return 1.0
-        return 0.70
+        if plan.overlap_beats < 24:
+            return 0.25
+        if stretch_pct_abs <= 4.5 and not high_vocals and plan.overlap_beats in (24, 32, 48):
+            return 0.95 if not distinct_drums else 0.80
+        return 0.65
     if style == "long_blend":
+        if plan.overlap_beats < 32:
+            return 0.25
         if (
             stretch_pct_abs <= 3.5
             and cam_dist <= 2
-            and timbre_sim >= 0.75
+            and timbre_sim >= 0.80
             and not high_vocals
-            and plan.overlap_beats >= 48
+            and plan.overlap_beats >= 32
         ):
             return 1.0
         return 0.60
@@ -471,7 +486,17 @@ def score_creative_plan(
     compat_reward = 0.30 * (0.40 * harmonic_score + 0.40 * tempo_score + 0.20 * timbre_score)
 
     # 2. Phrase & Creative Craft (0.0 .. 0.20)
-    phrase_overlap_ok = 1.0 if (plan.overlap_beats >= 8 and plan.overlap_beats % 8 == 0) else 0.0
+    # Club blends must be full phrases (>=24 beats); short 8-16b overlaps are only for quick_cut
+    if plan.transition_style == "quick_cut":
+        phrase_overlap_ok = (
+            1.0 if (4 <= plan.overlap_beats <= 16 and plan.overlap_beats % 4 == 0) else 0.0
+        )
+    else:
+        phrase_overlap_ok = (
+            1.0
+            if (24 <= plan.overlap_beats <= 64 and plan.overlap_beats % 8 == 0)
+            else (0.35 if plan.overlap_beats == 16 else 0.0)
+        )
     a_max_cue = max(0, len(deck_a.beat_times) - plan.overlap_beats - 4)
     b_max_cue = max(0, len(deck_b.beat_times) - plan.overlap_beats - 4)
     cue_bounds_ok = (
