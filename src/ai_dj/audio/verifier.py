@@ -191,8 +191,10 @@ def verify_transition(
 
     ons_pre = _mean_onset(pre_seg)
     ons_post = _mean_onset(post_seg)
+    ons_a_ov = _mean_onset(render.track_a_overlap_stem)
+    ons_b_ov = _mean_onset(render.track_b_overlap_stem)
     ons_ov = _mean_onset(ov_seg)
-    ons_ref = max(ons_pre, ons_post, 1e-6)
+    ons_ref = max(ons_pre, ons_post, ons_a_ov, ons_b_ov, 1e-6)
     drum_clash_ratio = round(ons_ov / ons_ref, 3)
     has_drum_clash = (
         spec.transition_style != "quick_cut" and drum_clash_ratio > cfg.max_drum_clash_ratio
