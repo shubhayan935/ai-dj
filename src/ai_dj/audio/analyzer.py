@@ -321,6 +321,7 @@ def segment_track_sections(
     energy_curve: list[float],
     vocal_mask: list[bool],
     onset_env: np.ndarray | None = None,
+    onset_hop_length: int = 512,
 ) -> list[TrackSection]:
     """Segment a full track into phrase-aligned structural sections with musical features."""
     n_beats = len(beat_times)
@@ -341,8 +342,10 @@ def segment_track_sections(
     y_low = sosfiltfilt(sos_low, y.astype(np.float64))
 
     if onset_env is None:
-        onset_env = librosa.onset.onset_strength(y=y, sr=sr)
-    onset_times = librosa.frames_to_time(np.arange(len(onset_env)), sr=sr)
+        onset_env = librosa.onset.onset_strength(y=y, sr=sr, hop_length=onset_hop_length)
+    onset_times = librosa.frames_to_time(
+        np.arange(len(onset_env)), sr=sr, hop_length=onset_hop_length
+    )
     onset_p90 = float(np.percentile(onset_env, 90)) if len(onset_env) else 1.0
     onset_scale = max(onset_p90, 1e-6)
 
@@ -487,7 +490,13 @@ def analyze_track(
     mean_energy = round(float(np.mean(energy_curve)), 4) if energy_curve else 0.0
     vocal_ratio = round(float(np.mean(vocal_mask)), 4) if vocal_mask else 0.0
     sections = segment_track_sections(
-        y, sr, beat_times, energy_curve, vocal_mask, onset_env=onset_env
+        y,
+        sr,
+        beat_times,
+        energy_curve,
+        vocal_mask,
+        onset_env=onset_env,
+        onset_hop_length=hop_length,
     )
 
     return AudioTrackCard(
