@@ -180,8 +180,20 @@ def verify_transition(
     )
     beat_aligned = beat_drift_ms <= cfg.max_beat_drift_ms
 
-    # 2. Phrase-grid alignment (bar/2-bar boundary)
-    phrase_aligned = (spec.cue_out_beat_a % 8 == 0) and (spec.cue_in_beat_b % 8 == 0)
+    # 2. Phrase-grid alignment: aligned to the track's detected bar-1 phrase phase (or % 8)
+    def _is_phrase_aligned(card: AudioTrackCard, cue_beat: int) -> bool:
+        if card.sections:
+            # Check exact/±1b hit on any detected phrase boundary, or same 8-beat phrase phase
+            for sec in card.sections:
+                if abs(cue_beat - sec.start_beat) <= 1:
+                    return True
+            phase = card.sections[1].start_beat % 8 if len(card.sections) > 1 else 0
+            return ((cue_beat - phase) % 8) == 0
+        return (cue_beat % 8) == 0
+
+    phrase_aligned = _is_phrase_aligned(card_a, spec.cue_out_beat_a) and _is_phrase_aligned(
+        card_b, spec.cue_in_beat_b
+    )
 
     # 3. Vocal-on-vocal clash ratio during overlap (0.5s frame resolution)
     stem_a_v = (
