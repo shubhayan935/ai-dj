@@ -57,6 +57,10 @@ class RenderResult:
     out_wav: Path | None = None
     rendered_a_overlap_stem: np.ndarray | None = None
     rendered_b_overlap_stem: np.ndarray | None = None
+    rendered_a_drums: np.ndarray | None = None
+    rendered_b_drums: np.ndarray | None = None
+    rendered_a_harm: np.ndarray | None = None
+    rendered_b_harm: np.ndarray | None = None
 
 
 def _to_mono(y: np.ndarray) -> np.ndarray:
@@ -359,6 +363,10 @@ def render_transition(
 
     rendered_a_ov: np.ndarray | None = None
     rendered_b_ov: np.ndarray | None = None
+    rendered_a_drums_ov: np.ndarray | None = None
+    rendered_b_drums_ov: np.ndarray | None = None
+    rendered_a_harm_ov: np.ndarray | None = None
+    rendered_b_harm_ov: np.ndarray | None = None
     if spec.transition_style == "quick_cut":
         # Phrase-aligned 2-beat cut with a brief click-free high-pass exit tail on Track A
         cut_n = min(ov_n, max(256, int(round(2.0 * beat_dur_a * sr))))
@@ -409,26 +417,88 @@ def render_transition(
                 stems_b = None
 
         if stems_a is not None and stems_b is not None:
-            g_a_voc = np.cos(0.5 * np.pi * _smoothstep(t / 0.35))
-            g_b_voc = np.sin(
-                0.5 * np.pi * _smoothstep((t - max(0.0, spec.bass_swap_beat_frac - 0.05)) / 0.25)
-            )
-            g_a_oth = np.cos(0.5 * np.pi * _smoothstep((t - 0.10) / 0.85))
-            g_b_oth = np.sin(0.5 * np.pi * _smoothstep(t / 0.55))
-            # Only ONE track's drums + bass play at any instant (tight 2-beat swap at s_swap)
-            g_a_rhythm = np.cos(0.5 * np.pi * s_swap)
-            g_b_rhythm = np.sin(0.5 * np.pi * s_swap)
-            rendered_a_ov = (
-                (stems_a["drums"] + stems_a["bass"]) * g_a_rhythm
-                + stems_a["vocals"] * g_a_voc
-                + stems_a["other"] * g_a_oth
+            from ai_dj.audio.analyzer import camelot_distance
+
+            cam_dist = camelot_distance(card_a.camelot, card_b.camelot)
+            if cam_dist >= 3:
+                # Key-aware DRUM-BRIDGE 4-stem transition (for distant keys like 1A -> 5A):
+                # 1. Fade Track A's harmony (other + vocals + bass) to 0% over 0%..42%
+                #    so A's melody is GONE before B's melody enters at 46% (ZERO harmonic clash).
+                # 2. Keep only ONE drum kit dominant: A drums carry 0%..46%, then smoothly
+                #    hand off to B drums over a tight 4-beat bridge (44%..56%) with no prolonged
+                #    dual-kit stacking.
+                # 3. Bring Track B's synths (other), bass, and vocals in cleanly over 46%..90%.
+                bridge_w = max(0.08, min(0.18, (4.0 * beat_dur_a) / max(ov_sec, 1e-3)))
+                s_bridge = _smoothstep((t - (0.50 - bridge_w / 2.0)) / bridge_w)
+                g_a_drums = np.cos(0.5 * np.pi * s_bridge)
+                g_b_drums = np.sin(0.5 * np.pi * s_bridge)
+
+                g_a_bass = np.cos(0.5 * np.pi * _smoothstep(t / 0.42))
+                g_b_bass = np.sin(0.5 * np.pi * _smoothstep((t - 0.48) / 0.30))
+
+                g_a_voc = np.cos(0.5 * np.pi * _smoothstep(t / 0.36))
+                g_b_voc = np.sin(0.5 * np.pi * _smoothstep((t - 0.56) / 0.34))
+
+                g_a_oth = np.cos(0.5 * np.pi * _smoothstep(t / 0.42))
+                g_b_oth = np.sin(0.5 * np.pi * _smoothstep((t - 0.46) / 0.38))
+
+                a_d = stems_a["drums"] * g_a_drums
+                b_d = stems_b["drums"] * g_b_drums
+                a_h = stems_a["other"] * g_a_oth + stems_a["vocals"] * g_a_voc
+                b_h = stems_b["other"] * g_b_oth + stems_b["vocals"] * g_b_voc
+                rendered_a_ov = (a_d + stems_a["bass"] * g_a_bass + a_h).astype(np.float32)
+                rendered_b_ov = (b_d + stems_b["bass"] * g_b_bass + b_h).astype(np.float32)
+                rendered_a_drums_ov = a_d.astype(np.float32)
+                rendered_b_drums_ov = b_d.astype(np.float32)
+                rendered_a_harm_ov = (a_h + stems_a["bass"] * g_a_bass).astype(np.float32)
+                rendered_b_harm_ov = (b_h + stems_b["bass"] * g_b_bass).astype(np.float32)
+            else:
+                # Harmonic-compatible progressive 4-stem weave:
+                # Tease B's synths (other) over A's drums+bass, then swap drums+bass cleanly
+                b_drums_low, b_drums_mid, b_drums_hi = split_three_band(
+                    stems_b["drums"], sr, low_hz=280.0, high_hz=4000.0
+                )
+                a_drums_low, a_drums_mid, a_drums_hi = split_three_band(
+                    stems_a["drums"], sr, low_hz=280.0, high_hz=4000.0
+                )
+                a_drums_top = a_drums_mid + a_drums_hi
+                b_drums_top = b_drums_mid + b_drums_hi
+
+                low_w = max(0.10, min(0.22, (4.0 * beat_dur_a) / max(ov_sec, 1e-3)))
+                s_low = _smoothstep((t - (spec.bass_swap_beat_frac - low_w / 2.0)) / low_w)
+                g_a_low = np.cos(0.5 * np.pi * s_low)
+                g_b_low = np.sin(0.5 * np.pi * s_low)
+
+                # Keep top-drum crossover tight around swap so dual-drum duration stays brief
+                g_a_top = np.cos(0.5 * np.pi * s_low)
+                g_b_top = np.sin(0.5 * np.pi * s_low)
+
+                g_a_voc = np.cos(0.5 * np.pi * _smoothstep(t / 0.45))
+                g_b_voc = np.sin(0.5 * np.pi * _smoothstep((t - 0.45) / 0.40))
+                g_a_oth = np.cos(0.5 * np.pi * _smoothstep((t - 0.15) / 0.75))
+                g_b_oth = np.sin(0.5 * np.pi * _smoothstep(t / 0.55))
+
+                a_d = a_drums_low * g_a_low + a_drums_top * g_a_top
+                b_d = b_drums_low * g_b_low + b_drums_top * g_b_top
+                a_h = stems_a["other"] * g_a_oth + stems_a["vocals"] * g_a_voc
+                b_h = stems_b["other"] * g_b_oth + stems_b["vocals"] * g_b_voc
+                rendered_a_ov = (a_d + stems_a["bass"] * g_a_low + a_h).astype(np.float32)
+                rendered_b_ov = (b_d + stems_b["bass"] * g_b_low + b_h).astype(np.float32)
+                rendered_a_drums_ov = a_d.astype(np.float32)
+                rendered_b_drums_ov = b_d.astype(np.float32)
+                rendered_a_harm_ov = (a_h + stems_a["bass"] * g_a_low).astype(np.float32)
+                rendered_b_harm_ov = (b_h + stems_b["bass"] * g_b_low).astype(np.float32)
+
+            # Seamless 2-beat boundary blend with raw ov_a / ov_b at edges
+            edge_w = max(0.03, min(0.08, (2.0 * beat_dur_a) / max(ov_sec, 1e-3)))
+            in_blend = _smoothstep(t / edge_w)
+            out_blend = _smoothstep((1.0 - t) / edge_w)
+            stem_mix = rendered_a_ov + rendered_b_ov
+            ov_mix = (
+                ov_a * (1.0 - in_blend)
+                + stem_mix * (in_blend * out_blend)
+                + ov_b * (1.0 - out_blend)
             ).astype(np.float32)
-            rendered_b_ov = (
-                (stems_b["drums"] + stems_b["bass"]) * g_b_rhythm
-                + stems_b["vocals"] * g_b_voc
-                + stems_b["other"] * g_b_oth
-            ).astype(np.float32)
-            ov_mix = (rendered_a_ov + rendered_b_ov).astype(np.float32)
         else:
             a_harm = np.vstack([librosa.effects.harmonic(ch) for ch in ov_a])
             a_perc = ov_a - a_harm
@@ -498,4 +568,8 @@ def render_transition(
         out_wav=out_wav,
         rendered_a_overlap_stem=_to_mono(rendered_a_ov) if rendered_a_ov is not None else None,
         rendered_b_overlap_stem=_to_mono(rendered_b_ov) if rendered_b_ov is not None else None,
+        rendered_a_drums=_to_mono(rendered_a_drums_ov) if rendered_a_drums_ov is not None else None,
+        rendered_b_drums=_to_mono(rendered_b_drums_ov) if rendered_b_drums_ov is not None else None,
+        rendered_a_harm=_to_mono(rendered_a_harm_ov) if rendered_a_harm_ov is not None else None,
+        rendered_b_harm=_to_mono(rendered_b_harm_ov) if rendered_b_harm_ov is not None else None,
     )

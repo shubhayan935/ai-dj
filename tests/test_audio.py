@@ -58,3 +58,57 @@ def test_defect_gym_meets_95_pct_recall_gate(tmp_path: Path) -> None:
     assert report["clean_false_positive_rate"] <= 0.10, report
     assert report["passed_exit_gate"] is True
     assert (tmp_path / "defect_gym_report.md").exists()
+
+
+def test_psychoacoustic_critic_detects_harmonic_clash_and_dual_drums() -> None:
+    import numpy as np
+
+    from ai_dj.audio.critic import evaluate_transition_psychoacoustics, plomp_levelt_roughness
+
+    sr = 22050
+    t = np.linspace(0.0, 4.0, sr * 4, endpoint=False, dtype=np.float32)
+    # 1. Minor 2nd (440 Hz + 466.16 Hz) has much higher Plomp-Levelt roughness than unison/fifth
+    consonant = 0.4 * np.sin(2 * np.pi * 440.0 * t[:sr]) + 0.4 * np.sin(2 * np.pi * 659.25 * t[:sr])
+    dissonant = 0.4 * np.sin(2 * np.pi * 440.0 * t[:sr]) + 0.4 * np.sin(2 * np.pi * 466.16 * t[:sr])
+    assert plomp_levelt_roughness(dissonant, sr) > plomp_levelt_roughness(consonant, sr) * 2.0
+
+    # 2. Clashing melodies (A4 + Bb4 simultaneously) + dual simultaneous drums
+    harm_a = 0.35 * np.sin(2 * np.pi * 440.0 * t)
+    harm_b = 0.35 * np.sin(2 * np.pi * 466.16 * t)
+    rng = np.random.default_rng(7)
+    drums_a = (0.3 * rng.standard_normal(len(t))).astype(np.float32)
+    drums_b = (0.3 * rng.standard_normal(len(t))).astype(np.float32)
+    mix_bad = harm_a + harm_b + drums_a + drums_b
+    crit_bad = evaluate_transition_psychoacoustics(
+        mix_bad,
+        harm_a + drums_a,
+        harm_b + drums_b,
+        sr,
+        rendered_a_drums=drums_a,
+        rendered_b_drums=drums_b,
+        rendered_a_harm=harm_a,
+        rendered_b_harm=harm_b,
+    )
+    assert "harmonic_clash" in crit_bad.issues
+    assert "dual_drum_overlap" in crit_bad.issues
+    assert len(crit_bad.actionable_fixes) >= 2
+
+    # 3. Clean drum-bridge separation (A fades out before B enters -> zero clash)
+    half = len(t) // 2
+    ha_clean = np.concatenate([harm_a[:half], np.zeros(len(t) - half, dtype=np.float32)])
+    hb_clean = np.concatenate([np.zeros(half, dtype=np.float32), harm_b[half:]])
+    da_clean = np.concatenate([drums_a[:half], np.zeros(len(t) - half, dtype=np.float32)])
+    db_clean = np.concatenate([np.zeros(half, dtype=np.float32), drums_b[half:]])
+    crit_good = evaluate_transition_psychoacoustics(
+        ha_clean + hb_clean + da_clean + db_clean,
+        ha_clean + da_clean,
+        hb_clean + db_clean,
+        sr,
+        rendered_a_drums=da_clean,
+        rendered_b_drums=db_clean,
+        rendered_a_harm=ha_clean,
+        rendered_b_harm=hb_clean,
+    )
+    assert crit_good.peak_harmonic_clash < 0.05
+    assert crit_good.peak_dual_drum_overlap < 0.05
+    assert crit_good.naturalness_score > crit_bad.naturalness_score

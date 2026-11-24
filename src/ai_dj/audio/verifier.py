@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field
 from scipy.signal import butter, sosfiltfilt
 
 from ai_dj.audio.analyzer import AudioTrackCard, camelot_distance, estimate_vocal_activity_mask
+from ai_dj.audio.critic import PsychoacousticCritique, evaluate_transition_psychoacoustics
 from ai_dj.audio.renderer import RenderResult, RenderSpec
 
 
@@ -22,6 +23,7 @@ class QAThresholds(BaseModel):
     max_clipped_samples: int = 8
     max_low_band_excess_db: float = 1.6
     max_drum_clash_ratio: float = 1.38
+    max_step_rms_db: float = 4.5
     max_tempo_stretch_pct: float = 8.0
 
 
@@ -45,9 +47,12 @@ class TransitionQAReport(BaseModel):
     has_bass_clash: bool
     drum_clash_ratio: float = 1.0
     has_drum_clash: bool = False
+    max_step_rms_db: float = 0.0
+    has_sudden_jump: bool = False
     tempo_stretch_pct: float
     excessive_stretch: bool
     camelot_dist: int
+    psychoacoustic: PsychoacousticCritique | None = None
     defects_detected: list[str] = Field(default_factory=list)
     passed: bool
     verifiable_reward: float
@@ -119,6 +124,7 @@ def verify_transition(
     spec: RenderSpec,
     *,
     thresholds: QAThresholds | None = None,
+    include_psychoacoustic: bool = False,
 ) -> TransitionQAReport:
     """Run deterministic technical QA checks on a rendered transition."""
     cfg = thresholds or QAThresholds()
@@ -208,9 +214,45 @@ def verify_transition(
         spec.transition_style != "quick_cut" and drum_clash_ratio > cfg.max_drum_clash_ratio
     )
 
+    # 6c. Local 0.5s loudness discontinuity inside overlap (catches sudden cuts/jumps)
+    mono_mix = np.mean(raw_mix, axis=0) if raw_mix.ndim == 2 else raw_mix
+    win_n = max(512, int(0.5 * sr))
+    step_start = max(0, s0 - win_n)
+    step_end = min(len(mono_mix), s1 + win_n)
+    ov_region = mono_mix[step_start:step_end]
+    rms_steps: list[float] = []
+    for pos in range(0, max(0, len(ov_region) - win_n + 1), win_n):
+        seg_w = ov_region[pos : pos + win_n]
+        rms_steps.append(20.0 * float(np.log10(np.sqrt(np.mean(seg_w**2)) + 1e-9)))
+    max_step_rms_db = (
+        round(max(abs(rms_steps[i] - rms_steps[i - 1]) for i in range(1, len(rms_steps))), 2)
+        if len(rms_steps) >= 2
+        else 0.0
+    )
+    has_sudden_jump = (
+        spec.transition_style != "quick_cut" and max_step_rms_db > cfg.max_step_rms_db
+    )
+
     # 7. Tempo stretch & harmonic compatibility
     excessive_stretch = render.tempo_stretch_pct > cfg.max_tempo_stretch_pct
     c_dist = camelot_distance(card_a.camelot, card_b.camelot)
+
+    # 7b. Psychoacoustic Mix Critic (Plomp-Levelt, cross-chroma, peak dual-drum, Bark masking)
+    psycho: PsychoacousticCritique | None = None
+    if include_psychoacoustic or render.rendered_a_drums is not None:
+        psycho = evaluate_transition_psychoacoustics(
+            ov_seg,
+            stem_a_v,
+            stem_b_v,
+            sr,
+            overlap_start_sec=s0 / float(sr),
+            rendered_a_drums=render.rendered_a_drums,
+            rendered_b_drums=render.rendered_b_drums,
+            rendered_a_harm=render.rendered_a_harm,
+            rendered_b_harm=render.rendered_b_harm,
+            solo_a_ref=pre_seg,
+            solo_b_ref=post_seg,
+        )
 
     defects: list[str] = []
     if not beat_aligned:
@@ -225,8 +267,14 @@ def verify_transition(
         defects.append("bass_clash")
     if has_drum_clash:
         defects.append("drum_clash")
+    if has_sudden_jump:
+        defects.append("sudden_jump")
     if excessive_stretch:
         defects.append("excessive_stretch")
+    if psycho is not None:
+        for issue in psycho.issues:
+            if issue in ("harmonic_clash", "dual_drum_overlap") and issue not in defects:
+                defects.append(issue)
 
     # Verifiable 0..1 RL reward (hard-gated on technical defects)
     reward = 1.0
@@ -242,10 +290,17 @@ def verify_transition(
         reward -= 0.20
     if has_drum_clash:
         reward -= 0.15
+    if has_sudden_jump:
+        reward -= 0.20
     if not phrase_aligned:
         reward -= 0.10
     if excessive_stretch:
         reward -= 0.20
+    if psycho is not None:
+        if "harmonic_clash" in psycho.issues:
+            reward -= 0.20
+        if "dual_drum_overlap" in psycho.issues:
+            reward -= 0.20
     # Smooth bonus/penalty for harmonic proximity
     if c_dist > 2:
         reward -= min(0.10, 0.02 * (c_dist - 2))
@@ -269,9 +324,12 @@ def verify_transition(
         has_bass_clash=has_bass_clash,
         drum_clash_ratio=drum_clash_ratio,
         has_drum_clash=has_drum_clash,
+        max_step_rms_db=max_step_rms_db,
+        has_sudden_jump=has_sudden_jump,
         tempo_stretch_pct=render.tempo_stretch_pct,
         excessive_stretch=excessive_stretch,
         camelot_dist=c_dist,
+        psychoacoustic=psycho,
         defects_detected=defects,
         passed=len(defects) == 0,
         verifiable_reward=reward,
