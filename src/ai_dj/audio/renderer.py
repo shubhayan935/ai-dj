@@ -461,20 +461,34 @@ def render_transition(
     seg_a_full[:, offset_a : offset_a + avail_a] = src_a[:, :avail_a]
     seg_a_full = normalize_lufs(seg_a_full, sr, spec.target_lufs)
 
-    # Keep an un-looped copy of Track A's overlap for kick phase-lock so loop-tighten rolls
-    # never bias beat alignment.
-    ov_a_raw_for_lock = seg_a_full[:, pre_n : pre_n + ov_n].copy()
+    # Keep an un-tightened copy of Deck A's overlap for kick phase-lock so we lock to the
+    # exact kicks that play (including any loop) without loop-tightening rolls biasing alignment.
+    ov_a_for_lock = seg_a_full[:, pre_n : pre_n + ov_n].copy()
 
     # Optional real CDJ Deck A beat-exact loop at the mix tempo (stays locked to stretched Deck B)
     if spec.dsl_program is not None and spec.dsl_program.deck_a.loop is not None:
+        loop_cfg = spec.dsl_program.deck_a.loop
+        ov_a_for_lock = apply_deck_loop(
+            ov_a_for_lock,
+            loop_cfg.model_copy(update={"tighten": False}),
+            sr,
+            beat_dur_a,
+        )
         seg_a_full[:, pre_n : pre_n + ov_n] = apply_deck_loop(
             seg_a_full[:, pre_n : pre_n + ov_n],
-            spec.dsl_program.deck_a.loop,
+            loop_cfg,
             sr,
             beat_dur_a,
         )
     elif spec.loop_a_beats > 0 and spec.loop_a_beats < spec.overlap_beats:
         loop_n = max(512, min(ov_n, int(round(spec.loop_a_beats * beat_dur_a * sr))))
+        ov_a_for_lock = _build_beat_exact_loop(
+            ov_a_for_lock,
+            loop_n,
+            ov_n,
+            sr,
+            tighten=False,
+        )
         seg_a_full[:, pre_n : pre_n + ov_n] = _build_beat_exact_loop(
             seg_a_full[:, pre_n : pre_n + ov_n],
             loop_n,
@@ -505,7 +519,7 @@ def render_transition(
     # Post-stretch onset phase-lock (auto-aligns kicks to <15 ms unless defect shift is injected)
     phase_corr_samples = 0
     if spec.inject_beat_shift_ms == 0.0:
-        ov_a_m = _to_mono(ov_a_raw_for_lock)
+        ov_a_m = _to_mono(ov_a_for_lock)
         ov_b_m = _to_mono(base_b[:, :ov_n])
         phase_corr_samples = _phase_align_shift_samples(ov_a_m, ov_b_m, sr, card_a.bpm)
     inject_samples = int(round((spec.inject_beat_shift_ms / 1000.0) * sr))
