@@ -71,16 +71,20 @@ def _region_lufs(y: np.ndarray, sr: int) -> float:
     return round(20.0 * np.log10(rms), 2)
 
 
-def _measure_beat_drift_ms(
-    stem_a: np.ndarray,
-    stem_b: np.ndarray,
-    sr: int,
-    bpm: float,
+def _lowpass_kick_band(sig: np.ndarray, sr: int) -> np.ndarray | None:
+    """Return <160 Hz kick signal if it carries meaningful energy, else None."""
+    if len(sig) < 256:
+        return None
+    sos = butter(4, min(160.0 / (0.5 * sr), 0.9), btype="lowpass", output="sos")
+    low = sosfiltfilt(sos, sig.astype(np.float64)).astype(np.float32)
+    return low if float(np.sqrt(np.mean(low**2))) >= 1e-4 else None
+
+
+def _corr_lag_ms(
+    sig_a: np.ndarray, sig_b: np.ndarray, sr: int, bpm: float, hop: int = 256
 ) -> float:
-    """Measure beat/onset phase offset (ms) between Track A and Track B inside the overlap."""
-    hop = 256
-    env_a = librosa.onset.onset_strength(y=stem_a, sr=sr, hop_length=hop)
-    env_b = librosa.onset.onset_strength(y=stem_b, sr=sr, hop_length=hop)
+    env_a = librosa.onset.onset_strength(y=sig_a, sr=sr, hop_length=hop)
+    env_b = librosa.onset.onset_strength(y=sig_b, sr=sr, hop_length=hop)
     n = min(len(env_a), len(env_b))
     if n < 16:
         return 0.0
@@ -90,9 +94,8 @@ def _measure_beat_drift_ms(
     if denom < 1e-8:
         return 0.0
 
-    # Search lag within +/- half a beat period
     half_beat_sec = 0.5 * (60.0 / max(bpm, 60.0))
-    max_lag_frames = max(2, int(round(half_beat_sec * sr / hop)))
+    max_lag_frames = min(max(2, int(round(half_beat_sec * sr / hop))), n // 3)
     best_lag = 0
     best_corr = -1e9
     for lag in range(-max_lag_frames, max_lag_frames + 1):
@@ -103,9 +106,41 @@ def _measure_beat_drift_ms(
         if corr > best_corr:
             best_corr = corr
             best_lag = lag
+    return abs(best_lag) * (hop / float(sr)) * 1000.0
 
-    drift_ms = abs(best_lag) * (hop / float(sr)) * 1000.0
-    return round(drift_ms, 2)
+
+def _measure_beat_drift_ms(
+    stem_a: np.ndarray,
+    stem_b: np.ndarray,
+    sr: int,
+    bpm: float,
+) -> float:
+    """Measure <160 Hz kick phase/drift offset (ms) across global and sliding 2.5s windows."""
+    hop = 256
+    low_a = _lowpass_kick_band(stem_a, sr)
+    low_b = _lowpass_kick_band(stem_b, sr)
+    if low_a is not None and low_b is not None:
+        sa, sb = low_a, low_b
+    else:
+        sa, sb = stem_a, stem_b
+
+    global_ms = _corr_lag_ms(sa, sb, sr, bpm, hop=hop)
+
+    # Also check sliding 2.5s windows so linear tempo drift is never hidden by midpoint lock
+    n_tot = min(len(sa), len(sb))
+    win_n = int(round(2.5 * sr))
+    step_n = int(round(1.5 * sr))
+    win_lags: list[float] = []
+    if n_tot >= win_n + step_n:
+        for s0 in range(0, n_tot - win_n + 1, step_n):
+            wa, wb = sa[s0 : s0 + win_n], sb[s0 : s0 + win_n]
+            if float(np.sqrt(np.mean(wa**2))) < 1e-4 or float(np.sqrt(np.mean(wb**2))) < 1e-4:
+                continue
+            win_lags.append(_corr_lag_ms(wa, wb, sr, bpm, hop=hop))
+    if win_lags:
+        p90_win_ms = float(np.percentile(win_lags, 90))
+        return round(max(global_ms, p90_win_ms), 2)
+    return round(global_ms, 2)
 
 
 def _low_band_rms_db(y: np.ndarray, sr: int, cutoff_hz: float = 250.0) -> float:

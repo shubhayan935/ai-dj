@@ -21,18 +21,29 @@ AUDIO_NATIVE_SYSTEM_PROMPT = (
     "IMPORTANT: Real club blends need full phrase overlaps (24, 32, 48, or 64 beats) "
     "and MUST cue early enough in Deck A (`cue_out_beat_prev + overlap_beats <= total_beats - 4`) "
     "so the transition breathes smoothly without abrupt cuts.\n"
-    "Choose the exact right moment to mix out of Deck A and into Deck B, plus the best "
-    "creative DSP technique:\n"
-    '- "stem_strip_blend": 24-48b 4-stem (drums/bass/vocals/other) mix — BEST when the two '
-    "songs have distinct drum/kick timbres or vocals (keeps only ONE drum kit playing at a time, "
-    "teasing B's synths over A's beat before swapping drums+bass cleanly on the phrase).\n"
+    "Choose the exact right moment to mix out of Deck A and into Deck B, the creative DSP "
+    "technique, AND the exact parametric stem-automation timing (fractions in 0.15..0.90):\n"
+    '- "stem_strip_blend": 24-48b progressive 3-band drum-morph + 4-stem mix — BEST when the '
+    "two songs have distinct drum/kick timbres, vocals, or distant keys (morphs hats >4 kHz first, "
+    "then claps, then swaps <180 Hz kick+bass on the quantized downbeat).\n"
     '- "bass_swap": 24-48b 3-band EQ blend when drum timbres match closely and vocals are low.\n'
     '- "filter_sweep": 24-48b smooth HP/LP filter sweep across energy contrasts.\n'
     '- "long_blend": 32-64b hypnotic blend when BPM/key/timbre match closely and vocals are low.\n'
     '- "quick_cut": short 8-beat handoff ONLY when BPM gap >5% or key clash is unavoidable.\n'
+    "Stem automation guidelines:\n"
+    '- "hat_morph_end_frac": fraction when B\'s hi-hats finish replacing A\'s '
+    "(typically 0.40-0.55).\n"
+    '- "harmony_strip_a_end_frac": fraction when A\'s synths/chords reach 0% (use 0.35-0.45 for '
+    "distant keys dist>=3 to create a clean drum-bridge; 0.60-0.80 for compatible keys).\n"
+    '- "harmony_entry_b_start_frac": fraction when B\'s synths/chords enter (after '
+    "harmony_strip_a_end_frac when keys are distant; 0.10-0.25 when keys match).\n"
+    '- "vocal_entry_b_start_frac": fraction when B\'s vocals enter (after A\'s vocals clear, '
+    "typically 0.50-0.65).\n"
     "Respond with ONLY a single valid JSON object with keys in order: "
     '"next_track_id", "transition_style", "overlap_beats", '
-    '"cue_out_beat_prev", "cue_in_beat_next", "bass_swap_beat_frac".'
+    '"cue_out_beat_prev", "cue_in_beat_next", "bass_swap_beat_frac", '
+    '"hat_morph_end_frac", "harmony_strip_a_end_frac", '
+    '"harmony_entry_b_start_frac", "vocal_entry_b_start_frac".'
 )
 
 

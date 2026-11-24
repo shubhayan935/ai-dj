@@ -72,6 +72,10 @@ class CreativeMixPlan:
     cue_out_beat_prev: int
     cue_in_beat_next: int
     bass_swap_beat_frac: float = 0.5
+    hat_morph_end_frac: float | None = None
+    harmony_strip_a_end_frac: float | None = None
+    harmony_entry_b_start_frac: float | None = None
+    vocal_entry_b_start_frac: float | None = None
 
 
 @dataclass(frozen=True)
@@ -314,6 +318,15 @@ def parse_creative_plan(
         return None, "negative_cue"
     bs_frac = min(0.85, max(0.15, bs_frac))
 
+    def _opt_frac(key: str, lo: float, hi: float) -> float | None:
+        val = obj.get(key)
+        if val is None:
+            return None
+        try:
+            return round(min(hi, max(lo, float(val))), 2)
+        except (TypeError, ValueError):
+            return None
+
     return (
         CreativeMixPlan(
             next_track_id=tid,
@@ -322,6 +335,10 @@ def parse_creative_plan(
             cue_out_beat_prev=cue_out,
             cue_in_beat_next=cue_in,
             bass_swap_beat_frac=round(bs_frac, 2),
+            hat_morph_end_frac=_opt_frac("hat_morph_end_frac", 0.15, 0.90),
+            harmony_strip_a_end_frac=_opt_frac("harmony_strip_a_end_frac", 0.15, 0.95),
+            harmony_entry_b_start_frac=_opt_frac("harmony_entry_b_start_frac", 0.05, 0.85),
+            vocal_entry_b_start_frac=_opt_frac("vocal_entry_b_start_frac", 0.15, 0.90),
         ),
         None,
     )
@@ -528,6 +545,10 @@ def score_creative_plan(
             overlap_beats=plan.overlap_beats,
             transition_style=plan.transition_style,
             bass_swap_beat_frac=plan.bass_swap_beat_frac,
+            hat_morph_end_frac=plan.hat_morph_end_frac,
+            harmony_strip_a_end_frac=plan.harmony_strip_a_end_frac,
+            harmony_entry_b_start_frac=plan.harmony_entry_b_start_frac,
+            vocal_entry_b_start_frac=plan.vocal_entry_b_start_frac,
             context_beats=12,
         )
         try:
@@ -543,7 +564,9 @@ def score_creative_plan(
                 y_a=y_a,
                 y_b=y_b,
             )
-            qa = verify_transition(render_res, deck_a, deck_b, spec)
+            qa = verify_transition(
+                render_res, deck_a, deck_b, spec, include_psychoacoustic=True
+            )
             dsp_qa_reward = 0.50 * float(qa.verifiable_reward)
             qa_flags = tuple(qa.defects_detected)
         except Exception as exc:

@@ -662,6 +662,10 @@ def mix_song_pair(
         overlap_beats=overlap,
         transition_style=plan.transition_style,
         bass_swap_beat_frac=plan.bass_swap_beat_frac,
+        hat_morph_end_frac=plan.hat_morph_end_frac,
+        harmony_strip_a_end_frac=plan.harmony_strip_a_end_frac,
+        harmony_entry_b_start_frac=plan.harmony_entry_b_start_frac,
+        vocal_entry_b_start_frac=plan.vocal_entry_b_start_frac,
         context_beats=16,
     )
     safe_lbl = _safe_filename_part(label)
@@ -681,7 +685,7 @@ def mix_song_pair(
         stereo=True,
         use_demucs=(spec.transition_style == "stem_strip_blend"),
     )
-    qa = verify_transition(render_res, card_a, card_b, spec)
+    qa = verify_transition(render_res, card_a, card_b, spec, include_psychoacoustic=True)
     from ai_dj.rl.grpo_env import _section_at_beat
 
     sec_a_obj = _section_at_beat(card_a, spec.cue_out_beat_a)

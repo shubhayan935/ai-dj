@@ -34,6 +34,13 @@ class RenderSpec(BaseModel):
     overlap_beats: int = Field(default=32, ge=4, le=128)
     transition_style: RenderStyle = "bass_swap"
     bass_swap_beat_frac: float = Field(default=0.5, ge=0.1, le=0.9)
+    # Parametric stem/band automation controls (optional; model can override defaults)
+    hat_morph_end_frac: float | None = Field(default=None, ge=0.15, le=0.90)
+    clap_morph_start_frac: float | None = Field(default=None, ge=0.05, le=0.80)
+    clap_morph_end_frac: float | None = Field(default=None, ge=0.20, le=0.95)
+    harmony_strip_a_end_frac: float | None = Field(default=None, ge=0.15, le=0.95)
+    harmony_entry_b_start_frac: float | None = Field(default=None, ge=0.05, le=0.85)
+    vocal_entry_b_start_frac: float | None = Field(default=None, ge=0.15, le=0.90)
     context_beats: int = Field(default=16, ge=4, le=32)
     target_lufs: float = -14.0
     # Defect-injection hooks (used by the Defect Gym; always 0 / True in normal rendering)
@@ -463,13 +470,27 @@ def render_transition(
             swap_frac = max(0.25, min(0.75, swap_beat / float(max(spec.overlap_beats, 1))))
 
             # Stage 1: Hi-hats / top groove (>4 kHz) glide from A -> B first
-            s_d_hi = _smoothstep(t / max(0.20, swap_frac))
+            hat_end = (
+                float(spec.hat_morph_end_frac)
+                if spec.hat_morph_end_frac is not None
+                else max(0.20, swap_frac)
+            )
+            s_d_hi = _smoothstep(t / max(0.15, hat_end))
             g_a_d_hi = np.cos(0.5 * np.pi * s_d_hi)
             g_b_d_hi = np.sin(0.5 * np.pi * s_d_hi)
 
             # Stage 2: Claps / snares (180-4000 Hz) morph smoothly across the midpoint
-            mid_start = max(0.08, swap_frac - 0.22)
-            mid_dur = max(0.18, min(0.36, 0.34))
+            mid_start = (
+                float(spec.clap_morph_start_frac)
+                if spec.clap_morph_start_frac is not None
+                else max(0.08, swap_frac - 0.22)
+            )
+            mid_end = (
+                float(spec.clap_morph_end_frac)
+                if spec.clap_morph_end_frac is not None
+                else min(0.92, mid_start + 0.34)
+            )
+            mid_dur = max(0.15, mid_end - mid_start)
             s_d_mid = _smoothstep((t - mid_start) / mid_dur)
             g_a_d_mid = np.cos(0.5 * np.pi * s_d_mid)
             g_b_d_mid = np.sin(0.5 * np.pi * s_d_mid)
@@ -483,7 +504,48 @@ def render_transition(
             a_d = da_low * g_a_d_low + da_mid * g_a_d_mid + da_hi * g_a_d_hi
             b_d = db_low * g_b_d_low + db_mid * g_b_d_mid + db_hi * g_b_d_hi
 
-            if cam_dist >= 3:
+            has_explicit_harm = (
+                spec.harmony_strip_a_end_frac is not None
+                or spec.harmony_entry_b_start_frac is not None
+                or spec.vocal_entry_b_start_frac is not None
+            )
+            if has_explicit_harm:
+                # Model-driven parametric harmony & vocal automation
+                a_out = (
+                    float(spec.harmony_strip_a_end_frac)
+                    if spec.harmony_strip_a_end_frac is not None
+                    else (
+                        max(0.15, swap_frac - 0.08)
+                        if cam_dist >= 3
+                        else min(0.90, swap_frac + 0.25)
+                    )
+                )
+                b_in = (
+                    float(spec.harmony_entry_b_start_frac)
+                    if spec.harmony_entry_b_start_frac is not None
+                    else (min(0.85, swap_frac + 0.02) if cam_dist >= 3 else 0.12)
+                )
+                v_in = (
+                    float(spec.vocal_entry_b_start_frac)
+                    if spec.vocal_entry_b_start_frac is not None
+                    else min(0.85, swap_frac + 0.04)
+                )
+                if cam_dist >= 3 or a_out <= b_in:
+                    g_a_bass = np.cos(0.5 * np.pi * _smoothstep(t / max(0.15, a_out)))
+                    g_b_bass = np.sin(
+                        0.5 * np.pi * _smoothstep((t - swap_frac) / max(0.15, 0.78 - swap_frac))
+                    )
+                else:
+                    g_a_bass = g_a_d_low
+                    g_b_bass = g_b_d_low
+                voc_a_end = max(0.12, min(a_out, swap_frac - 0.06))
+                g_a_voc = np.cos(0.5 * np.pi * _smoothstep(t / voc_a_end))
+                g_b_voc = np.sin(
+                    0.5 * np.pi * _smoothstep((t - v_in) / max(0.15, 0.92 - v_in))
+                )
+                g_a_oth = np.cos(0.5 * np.pi * _smoothstep(t / max(0.15, a_out)))
+                g_b_oth = np.sin(0.5 * np.pi * _smoothstep((t - b_in) / max(0.15, 0.88 - b_in)))
+            elif cam_dist >= 3:
                 # Key-aware DRUM-BRIDGE (distant keys like 1A -> 5A):
                 # Strip Track A harmony + bass to 0% before Track B melody enters
                 a_out = max(0.15, swap_frac - 0.08)
@@ -537,18 +599,54 @@ def render_transition(
                 + ov_b * (1.0 - out_blend)
             ).astype(np.float32)
         else:
+            from ai_dj.audio.analyzer import camelot_distance
+
+            cam_dist = camelot_distance(card_a.camelot, card_b.camelot)
             a_harm = np.vstack([librosa.effects.harmonic(ch) for ch in ov_a])
             a_perc = ov_a - a_harm
             b_harm = np.vstack([librosa.effects.harmonic(ch) for ch in ov_b])
             b_perc = ov_b - b_harm
-            # Strip A's harmonic layer early, bring B's harmonic in over 0%..60%
-            g_a_harm = np.cos(0.5 * np.pi * _smoothstep(t / 0.50))
-            g_b_harm = np.sin(0.5 * np.pi * _smoothstep((t - 0.05) / 0.55))
-            # Tight single-kit drum swap at s_swap so two drum kits never clash
-            g_a_perc = np.cos(0.5 * np.pi * s_swap)
-            g_b_perc = np.sin(0.5 * np.pi * s_swap)
-            rendered_a_ov = (a_harm * g_a_harm + a_perc * g_a_perc).astype(np.float32)
-            rendered_b_ov = (b_harm * g_b_harm + b_perc * g_b_perc).astype(np.float32)
+            # Honor parametric harmony strip/entry controls (key-aware defaults in HPSS path)
+            default_a_out = 0.42 if cam_dist >= 3 else 0.50
+            default_b_in = 0.52 if cam_dist >= 3 else 0.25
+            a_out = (
+                float(spec.harmony_strip_a_end_frac)
+                if spec.harmony_strip_a_end_frac is not None
+                else default_a_out
+            )
+            b_in = (
+                float(spec.harmony_entry_b_start_frac)
+                if spec.harmony_entry_b_start_frac is not None
+                else default_b_in
+            )
+            g_a_harm = np.cos(0.5 * np.pi * _smoothstep(t / max(0.15, a_out)))
+            g_b_harm = np.sin(0.5 * np.pi * _smoothstep((t - b_in) / max(0.15, 0.88 - b_in)))
+            # Progressive 3-band percussive morph in fast path (hats glide, kick+claps swap tight)
+            pa_low, pa_mid, pa_hi = split_three_band(a_perc, sr, low_hz=180.0, high_hz=4000.0)
+            pb_low, pb_mid, pb_hi = split_three_band(b_perc, sr, low_hz=180.0, high_hz=4000.0)
+            hat_end = (
+                float(spec.hat_morph_end_frac)
+                if spec.hat_morph_end_frac is not None
+                else max(0.20, spec.bass_swap_beat_frac)
+            )
+            hat_start = max(0.0, hat_end - 0.30)
+            s_hi = _smoothstep((t - hat_start) / max(0.15, hat_end - hat_start))
+            a_p = (
+                pa_low * np.cos(0.5 * np.pi * s_swap)
+                + pa_mid * np.cos(0.5 * np.pi * s_swap)
+                + pa_hi * np.cos(0.5 * np.pi * s_hi)
+            )
+            b_p = (
+                pb_low * np.sin(0.5 * np.pi * s_swap)
+                + pb_mid * np.sin(0.5 * np.pi * s_swap)
+                + pb_hi * np.sin(0.5 * np.pi * s_hi)
+            )
+            rendered_a_harm_ov = (a_harm * g_a_harm).astype(np.float32)
+            rendered_b_harm_ov = (b_harm * g_b_harm).astype(np.float32)
+            rendered_a_drums_ov = a_p.astype(np.float32)
+            rendered_b_drums_ov = b_p.astype(np.float32)
+            rendered_a_ov = (rendered_a_harm_ov + rendered_a_drums_ov).astype(np.float32)
+            rendered_b_ov = (rendered_b_harm_ov + rendered_b_drums_ov).astype(np.float32)
             raw_blend = rendered_a_ov + rendered_b_ov
             _, mid_m, high_m = split_three_band(raw_blend, sr)
             ov_mix = (low_a * gain_a_low + low_b * gain_b_low + mid_m + high_m).astype(np.float32)
