@@ -426,18 +426,34 @@ def analyze_track(
     y = load_audio_mono(audio_path, sr=sr)
     duration_sec = round(len(y) / float(sr), 3)
 
-    onset_env = librosa.onset.onset_strength(y=y, sr=sr)
+    hop_length = 256
+    onset_env = librosa.onset.onset_strength(y=y, sr=sr, hop_length=hop_length)
     tempo, beat_frames = librosa.beat.beat_track(
-        onset_envelope=onset_env, sr=sr, start_bpm=122.0, tightness=120.0
+        onset_envelope=onset_env,
+        sr=sr,
+        hop_length=hop_length,
+        start_bpm=122.0,
+        tightness=120.0,
     )
     bpm = float(np.asarray(tempo).reshape(-1)[0])
-    beat_times = [round(float(t), 4) for t in librosa.frames_to_time(beat_frames, sr=sr)]
+    beat_times = [
+        round(float(t), 4)
+        for t in librosa.frames_to_time(beat_frames, sr=sr, hop_length=hop_length)
+    ]
 
     if len(beat_times) >= 4:
-        ibis = np.diff(np.array(beat_times, dtype=np.float64))
-        med = float(np.median(ibis))
-        bpm = round(60.0 / med, 2) if med > 0 else round(bpm, 2)
-        bpm_stability = round(float(np.mean(np.abs(ibis - med) / max(med, 1e-6) < 0.08)), 4)
+        bt_arr = np.array(beat_times, dtype=np.float64)
+        ibis = np.diff(bt_arr)
+        med_ibi = float(np.median(ibis))
+        bpm_stability = round(
+            float(np.mean(np.abs(ibis - med_ibi) / max(med_ibi, 1e-6) < 0.08)), 4
+        )
+        # Multi-beat span median eliminates integer-frame IBI quantization (<0.05 BPM accuracy)
+        span = min(32, max(1, len(bt_arr) // 3))
+        span_ibis = (bt_arr[span:] - bt_arr[:-span]) / float(span)
+        valid_spans = span_ibis[np.abs(span_ibis - med_ibi) / max(med_ibi, 1e-6) < 0.06]
+        precise_ibi = float(np.median(valid_spans)) if valid_spans.size else med_ibi
+        bpm = round(60.0 / precise_ibi, 2) if precise_ibi > 0 else round(bpm, 2)
     else:
         bpm = round(bpm, 2)
         bpm_stability = 0.0
