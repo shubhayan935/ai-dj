@@ -206,7 +206,8 @@ def verify_transition(
         if render.rendered_b_overlap_stem is not None
         else render.track_b_overlap_stem
     )
-    if spec.transition_style == "quick_cut" and card_a.bpm > 0:
+    is_quick_cut = spec.transition_style == "quick_cut" and spec.dsl_program is None
+    if is_quick_cut and card_a.bpm > 0:
         cut_n = min(
             len(stem_a_v), len(stem_b_v), max(256, int(round(2.0 * (60.0 / card_a.bpm) * sr)))
         )
@@ -257,9 +258,7 @@ def verify_transition(
     ons_ov = _mean_onset(ov_seg)
     ons_ref = max(ons_pre, ons_post, ons_a_ov, ons_b_ov, 1e-6)
     drum_clash_ratio = round(ons_ov / ons_ref, 3)
-    has_drum_clash = (
-        spec.transition_style != "quick_cut" and drum_clash_ratio > cfg.max_drum_clash_ratio
-    )
+    has_drum_clash = (not is_quick_cut) and drum_clash_ratio > cfg.max_drum_clash_ratio
 
     # 6c. Local 0.5s stereo-energy loudness discontinuity inside overlap (catches sudden cuts/jumps)
     n_tot = raw_mix.shape[-1]
@@ -276,9 +275,7 @@ def verify_transition(
         if len(rms_steps) >= 2
         else 0.0
     )
-    has_sudden_jump = (
-        spec.transition_style != "quick_cut" and max_step_rms_db > cfg.max_step_rms_db
-    )
+    has_sudden_jump = (not is_quick_cut) and max_step_rms_db > cfg.max_step_rms_db
 
     # 7. Tempo stretch & harmonic compatibility
     excessive_stretch = render.tempo_stretch_pct > cfg.max_tempo_stretch_pct
