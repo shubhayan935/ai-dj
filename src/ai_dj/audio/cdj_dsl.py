@@ -151,6 +151,15 @@ def apply_deck_loop(
             out[:, s0 + pos : s0 + pos + take] = chunk[:, :take]
         prev_len = cur_len
         pos += cur_len
+    # Click-free 8 ms crossfade when releasing a mid-overlap loop back to original audio
+    if s1 < total_n and xfade > 4 and s1 + xfade <= total_n:
+        rel_fade = np.linspace(0.0, 1.0, xfade, dtype=np.float32)
+        loop_end_tail = src_region[:, min(prev_len, src_region.shape[1] - xfade) :]
+        if loop_end_tail.shape[1] >= xfade:
+            tail = loop_end_tail[:, :xfade]
+        else:
+            tail = out[:, s1 - xfade : s1]
+        out[:, s1 : s1 + xfade] = tail * (1.0 - rel_fade) + audio[:, s1 : s1 + xfade] * rel_fade
     return out
 
 
@@ -241,8 +250,9 @@ def execute_cdj_program(
     )
 
     ov_n = stems_a["drums"].shape[1]
-    ov_beats = float(program.overlap_beats)
     beat_n = max(64, int(round(beat_dur_sec * sr)))
+    # Use the actual rendered overlap length in beats so keyframes, loops, and FX share one grid
+    ov_beats = max(1.0, ov_n / float(beat_n))
 
     # 3-band drum split (<180 Hz kick, 180-4000 Hz claps/snares, >4000 Hz hats/tops)
     a_dl, a_dm, a_dh = split_three_band(stems_a["drums"], sr, low_hz=180.0, high_hz=4000.0)
@@ -284,15 +294,22 @@ def execute_cdj_program(
                 btype: Literal["highpass", "lowpass"] = (
                     "highpass" if fx.fx_type == "hpf_sweep" else "lowpass"
                 )
+                seg_dry = sig[:, s0:s1]
                 seg_f = _apply_filter_sweep(
-                    sig[:, s0:s1], sr, btype=btype, start_hz=fx.start_hz, end_hz=fx.end_hz
+                    seg_dry, sr, btype=btype, start_hz=fx.start_hz, end_hz=fx.end_hz
                 ).astype(np.float32)
+                # 8 ms dry/wet edge blend so filter entry & exit never click
+                edge = min(int(round(0.008 * sr)), seg_f.shape[1] // 4)
+                if edge > 2:
+                    ramp = np.linspace(0.0, 1.0, edge, dtype=np.float32)
+                    seg_f[:, :edge] = seg_dry[:, :edge] * (1.0 - ramp) + seg_f[:, :edge] * ramp
+                    seg_f[:, -edge:] = seg_f[:, -edge:] * (1.0 - ramp) + seg_dry[:, -edge:] * ramp
                 updated = sig.copy()
                 updated[:, s0:s1] = seg_f
                 target_dict[sname] = updated
             elif fx.fx_type == "echo_out":
                 cut_frac = float(fx.start_beat) / max(ov_beats, 1.0)
-                target_dict[sname] = _apply_beat_synced_echo_out(
+                echoed = _apply_beat_synced_echo_out(
                     sig,
                     sr,
                     beat_dur_sec,
@@ -300,6 +317,15 @@ def execute_cdj_program(
                     feedback=fx.feedback,
                     delay_beats=fx.delay_beats,
                 )
+                # Respect end_beat cutoff with a smooth 20 ms fade-out
+                if s1 < ov_n:
+                    tail_fade = min(int(round(0.020 * sr)), s1 - s0)
+                    if tail_fade > 2:
+                        echoed[:, s1 - tail_fade : s1] *= np.linspace(
+                            1.0, 0.0, tail_fade, dtype=np.float32
+                        )
+                    echoed[:, s1:] = 0.0
+                target_dict[sname] = echoed
             elif fx.fx_type == "reverb_wash":
                 target_dict[sname] = _apply_reverb_wash(sig, sr, s0, s1, decay=fx.feedback)
             elif fx.fx_type == "vinyl_brake":
