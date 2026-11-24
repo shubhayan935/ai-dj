@@ -211,6 +211,14 @@ def build_pair_mix_tasks(
             stretch = abs((a.bpm - b.bpm) / max(b.bpm, 1.0)) * 100.0
             if stretch <= max_bpm_stretch_pct:
                 pairs.append((a, b))
+    if not pairs and max_bpm_stretch_pct < 8.0:
+        pairs = [
+            (a, b)
+            for a in cards
+            for b in cards
+            if a.track_id != b.track_id
+            and abs((a.bpm - b.bpm) / max(b.bpm, 1.0)) * 100.0 <= 8.0
+        ]
     if not pairs:
         pairs = [(a, b) for a in cards for b in cards if a.track_id != b.track_id]
     rng.shuffle(pairs)
