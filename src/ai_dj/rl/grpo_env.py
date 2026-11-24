@@ -197,7 +197,7 @@ def build_pair_mix_tasks(
     *,
     num_tasks: int = 40,
     seed: int = 42,
-    max_bpm_stretch_pct: float = 8.0,
+    max_bpm_stretch_pct: float = 5.0,
 ) -> list[AudioTransitionTask]:
     """Construct 2-song full-track pair mixing tasks (Deck A + fixed Deck B)."""
     if len(cards) < 2:
