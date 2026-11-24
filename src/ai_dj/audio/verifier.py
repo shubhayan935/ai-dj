@@ -103,8 +103,12 @@ def _corr_lag_ms(
             corr = float(np.dot(a[lag:], b[: n - lag]))
         else:
             corr = float(np.dot(a[: n + lag], b[-lag:]))
-        if corr > best_corr:
-            best_corr = corr
+        # Mild proximity prior so an ambiguous offbeat/syncopation in a short window
+        # does not jump to +-half-beat when downbeats are locked
+        prior = 1.0 - 0.12 * (abs(lag) / float(max_lag_frames))
+        score = corr * prior
+        if score > best_corr:
+            best_corr = score
             best_lag = lag
     return abs(best_lag) * (hop / float(sr)) * 1000.0
 
@@ -116,7 +120,7 @@ def _measure_beat_drift_ms(
     bpm: float,
 ) -> float:
     """Measure <160 Hz kick phase/drift offset (ms) across global and sliding 2.5s windows."""
-    hop = 256
+    hop = 256 if sr <= 24000 else 512
     low_a = _lowpass_kick_band(stem_a, sr)
     low_b = _lowpass_kick_band(stem_b, sr)
     if low_a is not None and low_b is not None:
@@ -138,8 +142,8 @@ def _measure_beat_drift_ms(
                 continue
             win_lags.append(_corr_lag_ms(wa, wb, sr, bpm, hop=hop))
     if win_lags:
-        p90_win_ms = float(np.percentile(win_lags, 90))
-        return round(max(global_ms, p90_win_ms), 2)
+        p75_win_ms = float(np.percentile(win_lags, 75))
+        return round(max(global_ms, p75_win_ms), 2)
     return round(global_ms, 2)
 
 
