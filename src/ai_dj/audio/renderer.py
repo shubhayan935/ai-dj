@@ -392,11 +392,19 @@ def render_transition(
         # True 4-stem mixing (Demucs) or fast HPSS single-kit drum+bass swap:
         # Bring in Track B's harmonic/synth layer over Track A's drums+bass,
         # then swap drums+bass cleanly at `s_swap` so only ONE drum kit plays at a time.
+        stems_a = None
+        stems_b = None
         if use_demucs:
-            from ai_dj.audio.stems import separate_four_stems
+            try:
+                from ai_dj.audio.stems import separate_four_stems
 
-            stems_a = separate_four_stems(ov_a, sr)
-            stems_b = separate_four_stems(ov_b, sr)
+                stems_a = separate_four_stems(ov_a, sr)
+                stems_b = separate_four_stems(ov_b, sr)
+            except ImportError:
+                stems_a = None
+                stems_b = None
+
+        if stems_a is not None and stems_b is not None:
             g_a_voc = np.cos(0.5 * np.pi * _smoothstep(t / 0.35))
             g_b_voc = np.sin(
                 0.5 * np.pi * _smoothstep((t - max(0.0, spec.bass_swap_beat_frac - 0.05)) / 0.25)
