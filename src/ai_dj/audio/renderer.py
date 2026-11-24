@@ -199,18 +199,21 @@ def _phase_align_shift_samples(
     """Find sample shift in [-half_beat, +half_beat] that locks Track B's <160 Hz kicks to A."""
     hop = 256 if sr <= 24000 else 512
 
-    # Low-pass below 160 Hz so phase lock aligns kick drums rather than off-beat hi-hats
-    def _kick_band(sig: np.ndarray) -> np.ndarray:
+    # Low-pass below 160 Hz only when BOTH decks have low-end kick energy so we never
+    # correlate Track A's kicks against Track B's offbeat high-frequency hats.
+    def _lowpass_kick(sig: np.ndarray) -> np.ndarray | None:
         if len(sig) < 256:
-            return sig
+            return None
         sos = butter(4, min(160.0 / (0.5 * sr), 0.9), btype="lowpass", output="sos")
         low = sosfiltfilt(sos, sig.astype(np.float64)).astype(np.float32)
-        if float(np.sqrt(np.mean(low**2))) < 1e-4:
-            return sig
-        return low
+        return low if float(np.sqrt(np.mean(low**2))) >= 1e-4 else None
 
-    ka = _kick_band(ov_a_mono)
-    kb = _kick_band(ov_b_mono)
+    low_a = _lowpass_kick(ov_a_mono)
+    low_b = _lowpass_kick(ov_b_mono)
+    if low_a is not None and low_b is not None:
+        ka, kb = low_a, low_b
+    else:
+        ka, kb = ov_a_mono, ov_b_mono
     env_a = librosa.onset.onset_strength(y=ka, sr=sr, hop_length=hop)
     env_b = librosa.onset.onset_strength(y=kb, sr=sr, hop_length=hop)
     n = min(len(env_a), len(env_b))
