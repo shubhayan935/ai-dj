@@ -458,11 +458,9 @@ def render_transition(
     seg_a_full[:, offset_a : offset_a + avail_a] = src_a[:, :avail_a]
     seg_a_full = normalize_lufs(seg_a_full, sr, spec.target_lufs)
 
-    # Optional real CDJ Deck A beat-exact loop across the overlap (using local beat grid)
+    # Optional real CDJ Deck A beat-exact loop at the mix tempo (stays locked to stretched Deck B)
     if spec.loop_a_beats > 0 and spec.loop_a_beats < spec.overlap_beats:
-        t_loop_end = _beat_time(card_a, spec.cue_out_beat_a + spec.loop_a_beats)
-        local_loop_sec = max(0.25, t_loop_end - t_cue_a)
-        loop_n = max(512, min(ov_n, int(round(local_loop_sec * sr))))
+        loop_n = max(512, min(ov_n, int(round(spec.loop_a_beats * beat_dur_a * sr))))
         seg_a_full[:, pre_n : pre_n + ov_n] = _build_beat_exact_loop(
             seg_a_full[:, pre_n : pre_n + ov_n],
             loop_n,
