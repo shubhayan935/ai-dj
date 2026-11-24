@@ -465,9 +465,40 @@ def _map_mixesdb_to_dsp_plan(rec: dict[str, Any]) -> dict[str, Any]:
     plan = rec.get("plan") or {}
     prev_t = rec.get("prev_track") or {}
     next_t = rec.get("next_track") or {}
+    bpm_prev = max(60.0, float(prev_t.get("bpm") or 125.0))
     bpm_delta_abs = abs(float(rec.get("bpm_delta") or 0.0))
+    bpm_gap_pct = 100.0 * bpm_delta_abs / bpm_prev
     raw_ov = float(plan.get("overlap_beats") or 32.0)
-    ov = int(max(8, min(64, round(raw_ov / 8.0) * 8)))
+
+    raw_style = str(plan.get("transition_style") or "standard_blend")
+    tid_str = str(rec.get("tran_id") or "")
+    tid_bit = int(hashlib.sha256(f"style:{tid_str}".encode()).hexdigest()[:8], 16) % 2
+    if bpm_gap_pct > 5.0 or raw_ov <= 12.0:
+        style = "quick_cut"
+        ov = 8
+        auto = (0.50, 0.35, 0.35, 0.40, 0.50)
+    else:
+        # Snap non-quick-cut blends to allowed phrase lengths (24, 32, 48, 64)
+        allowed_blends = (24, 32, 48, 64)
+        ov = min(allowed_blends, key=lambda b: (abs(b - raw_ov), b))
+        if raw_style in ("long_blend", "extended_overlay") or ov >= 48:
+            style = "long_blend"
+            ov = max(32, ov)
+            auto = (0.50, 0.50, 0.72, 0.20, 0.58)
+        elif raw_style == "short_blend" or ov <= 24:
+            if bpm_delta_abs >= 2.5:
+                style = "filter_sweep"
+                auto = (0.50, 0.40, 0.52, 0.32, 0.58)
+            else:
+                style = "bass_swap"
+                auto = (0.50, 0.45, 0.62, 0.25, 0.55)
+        else:
+            if bpm_delta_abs >= 1.5 or tid_bit == 0:
+                style = "stem_strip_blend"
+                auto = (0.50, 0.42, 0.45, 0.48, 0.60)
+            else:
+                style = "bass_swap"
+                auto = (0.50, 0.45, 0.62, 0.25, 0.55)
 
     n_beats_prev = max(32, int(prev_t.get("beat_count") or 512))
     n_beats_next = max(32, int(next_t.get("beat_count") or 512))
@@ -475,31 +506,6 @@ def _map_mixesdb_to_dsp_plan(rec: dict[str, Any]) -> dict[str, Any]:
     cue_out = max(16, min(n_beats_prev - ov - 4, raw_cue_out))
     raw_cue_in = int(round(float(plan.get("track_cue_in_beat_next") or 0)))
     cue_in = max(0, min(max(0, n_beats_next - ov - 4), raw_cue_in))
-
-    raw_style = str(plan.get("transition_style") or "standard_blend")
-    tid_str = str(rec.get("tran_id") or "")
-    tid_bit = int(hashlib.sha256(f"style:{tid_str}".encode()).hexdigest()[:8], 16) % 2
-    if bpm_delta_abs > 5.0 or ov <= 8:
-        style = "quick_cut"
-        ov = 8
-        auto = (0.50, 0.35, 0.35, 0.40, 0.50)
-    elif raw_style in ("long_blend", "extended_overlay") or ov >= 48:
-        style = "long_blend"
-        auto = (0.50, 0.50, 0.72, 0.20, 0.58)
-    elif raw_style == "short_blend" or ov <= 24:
-        if bpm_delta_abs >= 2.5:
-            style = "filter_sweep"
-            auto = (0.50, 0.40, 0.52, 0.32, 0.58)
-        else:
-            style = "bass_swap"
-            auto = (0.50, 0.45, 0.62, 0.25, 0.55)
-    else:
-        if bpm_delta_abs >= 1.5 or tid_bit == 0:
-            style = "stem_strip_blend"
-            auto = (0.50, 0.42, 0.45, 0.48, 0.60)
-        else:
-            style = "bass_swap"
-            auto = (0.50, 0.45, 0.62, 0.25, 0.55)
 
     return {
         "next_track_id": str(next_t.get("track_id") or "next_track"),
