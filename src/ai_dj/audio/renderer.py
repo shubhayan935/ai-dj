@@ -903,6 +903,30 @@ def render_transition(
             _, mid_pa, hi_pa = split_three_band(a_p, sr)
             _, mid_pb, hi_pb = split_three_band(b_p, sr)
             rendered_a_harm_ov = (mid_ha + hi_ha).astype(np.float32)
+            # Honor hold_a_stem & exit_fx in fast HPSS path too (so GRPO rollouts render them)
+            if spec.hold_a_stem != "none" or spec.exit_fx != "none":
+                cut_frac = min(0.92, max(0.75, spec.bass_swap_beat_frac + 0.25))
+                if spec.hold_a_stem != "none":
+                    _, mid_raw, hi_raw = split_three_band(a_harm, sr)
+                    held_src = (mid_raw + hi_raw).astype(np.float32)
+                else:
+                    held_src = rendered_a_harm_ov
+                if spec.exit_fx in ("hpf_sweep", "hpf_echo_out"):
+                    hp_src = _apply_filter_sweep(
+                        held_src, sr, btype="highpass", start_hz=150.0, end_hz=2200.0
+                    ).astype(np.float32)
+                    wet_r = _smoothstep((t - 0.30) / 0.45)
+                    held_src = (held_src * (1.0 - wet_r) + hp_src * wet_r).astype(np.float32)
+                if spec.exit_fx in ("echo_out", "hpf_echo_out"):
+                    rendered_a_harm_ov = _apply_beat_synced_echo_out(
+                        held_src, sr, beat_dur_a, cut_frac
+                    )
+                elif spec.hold_a_stem != "none":
+                    cut_w = max(0.02, min(0.06, beat_dur_a / max(ov_sec, 1e-3)))
+                    c_env = np.cos(0.5 * np.pi * _smoothstep((t - (cut_frac - cut_w)) / cut_w))
+                    rendered_a_harm_ov = (held_src * c_env).astype(np.float32)
+                else:
+                    rendered_a_harm_ov = held_src
             rendered_b_harm_ov = (mid_hb + hi_hb).astype(np.float32)
             rendered_a_drums_ov = (low_a * gain_a_low + mid_pa + hi_pa).astype(np.float32)
             rendered_b_drums_ov = (low_b * gain_b_low + mid_pb + hi_pb).astype(np.float32)
