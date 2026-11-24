@@ -504,6 +504,68 @@ def _creative_technique_fit(
     return 0.5
 
 
+def _cdj_move_craft_score(
+    deck_a: AudioTrackCard,
+    deck_b: AudioTrackCard,
+    plan: CreativeMixPlan,
+    cam_dist: int,
+) -> float:
+    """Reward phrase-downbeat landing and audio-appropriate CDJ moves (loops, holds, exit FX)."""
+    # 1. Phrase landing: does cue_in + overlap land on a real Track B phrase boundary?
+    landing_beat = plan.cue_in_beat_next + plan.overlap_beats
+    landing_score = 0.35
+    if deck_b.sections:
+        for sec in deck_b.sections:
+            if abs(landing_beat - sec.start_beat) <= 1:
+                landing_score = 1.0 if sec.label in ("drop", "groove") else 0.75
+                break
+    elif landing_beat % 16 == 0:
+        landing_score = 0.75
+
+    # 2. Audio-aware CDJ move selection (all moves first-class: drum morph, loop+echo, vocal hold)
+    sec_a = _section_at_beat(deck_a, plan.cue_out_beat_prev)
+    sec_b = _section_at_beat(deck_b, plan.cue_in_beat_next)
+    a_voc = sec_a.vocal_ratio if sec_a is not None else deck_a.vocal_ratio
+    b_voc = sec_b.vocal_ratio if sec_b is not None else deck_b.vocal_ratio
+    used_loop = plan.loop_a_beats in (4, 8, 16)
+    used_fx = plan.exit_fx != "none"
+    used_dsl = plan.dsl_program is not None
+
+    if used_dsl:
+        move_score = 0.95
+    elif a_voc >= 0.20 and b_voc < 0.20:
+        # Vocal over instrumental entry -> reward vocal hold + echo-out
+        if plan.hold_a_stem == "vocals" and used_fx:
+            move_score = 1.0
+        elif plan.hold_a_stem == "vocals" or used_fx:
+            move_score = 0.80
+        else:
+            move_score = 0.55
+    elif cam_dist >= 3:
+        # Distant keys -> reward loop + HPF/echo-out OR clean drum-bridge separation
+        clean_bridge = (
+            plan.harmony_strip_a_end_frac is not None
+            and plan.harmony_entry_b_start_frac is not None
+            and plan.harmony_strip_a_end_frac <= plan.harmony_entry_b_start_frac
+        )
+        if (used_loop and used_fx) or (clean_bridge and used_fx):
+            move_score = 1.0
+        elif used_loop or clean_bridge or used_fx:
+            move_score = 0.80
+        else:
+            move_score = 0.45
+    else:
+        # Compatible keys -> progressive drum morph, loop+FX, or hold all work great
+        if plan.transition_style == "stem_strip_blend" and (used_loop or used_fx):
+            move_score = 1.0
+        elif plan.transition_style == "stem_strip_blend":
+            move_score = 0.85
+        else:
+            move_score = 0.65
+
+    return 0.50 * landing_score + 0.50 * move_score
+
+
 def score_creative_plan(
     task: AudioTransitionTask,
     raw_text: str,
@@ -566,12 +628,14 @@ def score_creative_plan(
     )
     tech_fit = _creative_technique_fit(deck_a, deck_b, plan, stretch_abs, cam_dist, timbre_sim)
     sec_fit = _section_handoff_score(deck_a, deck_b, plan)
+    cdj_fit = _cdj_move_craft_score(deck_a, deck_b, plan, cam_dist)
     craft_reward = 0.20 * (
-        0.20 * phrase_overlap_ok
-        + 0.20 * cue_bounds_ok
+        0.15 * phrase_overlap_ok
+        + 0.15 * cue_bounds_ok
         + 0.10 * cue_bar_ok
-        + 0.25 * tech_fit
-        + 0.25 * sec_fit
+        + 0.20 * tech_fit
+        + 0.20 * sec_fit
+        + 0.20 * cdj_fit
     )
 
     # 3. Real DSP Render + QA Verifier (0.0 .. 0.50)
