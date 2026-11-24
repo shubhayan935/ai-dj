@@ -218,21 +218,28 @@ def _build_beat_exact_loop(
 
     pos = 0
     cur_len = loop_n
+    prev_len = loop_n
     while pos < total_samples:
-        # Optional DJ tension tighten: halve loop length in the last 30% of the overlap
-        if tighten and pos >= int(0.68 * total_samples) and cur_len >= 1024:
-            target_len = loop_n // 2 if pos < int(0.84 * total_samples) else max(512, loop_n // 4)
+        # Optional DJ tension tighten: halve loop length in the second half (supports 16->8->4)
+        if tighten and pos >= int(0.49 * total_samples) and cur_len >= 1024:
+            target_len = loop_n // 2 if pos < int(0.74 * total_samples) else max(512, loop_n // 4)
             cur_len = max(512, min(loop_n, target_len))
         chunk = ov_a[:, :cur_len].copy()
         take = min(cur_len, total_samples - pos)
         if pos > 0 and xfade > 4 and take > xfade:
             fade = np.linspace(0.0, 1.0, xfade, dtype=np.float32)
-            out[:, pos : pos + xfade] = (
-                out[:, pos : pos + xfade] * (1.0 - fade) + chunk[:, :xfade] * fade
-            )
+            # Crossfade the natural continuation past prev_len (or prev tail) into the loop start
+            if prev_len + xfade <= ov_a.shape[1]:
+                prev_tail = ov_a[:, prev_len : prev_len + xfade]
+            else:
+                prev_tail = out[:, max(0, pos - xfade) : pos]
+                if prev_tail.shape[1] < xfade:
+                    prev_tail = np.pad(prev_tail, ((0, 0), (0, xfade - prev_tail.shape[1])))
+            out[:, pos : pos + xfade] = prev_tail * (1.0 - fade) + chunk[:, :xfade] * fade
             out[:, pos + xfade : pos + take] = chunk[:, xfade:take]
         else:
             out[:, pos : pos + take] = chunk[:, :take]
+        prev_len = cur_len
         pos += cur_len
     return out
 
@@ -449,9 +456,11 @@ def render_transition(
     seg_a_full[:, offset_a : offset_a + avail_a] = src_a[:, :avail_a]
     seg_a_full = normalize_lufs(seg_a_full, sr, spec.target_lufs)
 
-    # Optional real CDJ Deck A beat-exact loop across the overlap
+    # Optional real CDJ Deck A beat-exact loop across the overlap (using local beat grid)
     if spec.loop_a_beats > 0 and spec.loop_a_beats < spec.overlap_beats:
-        loop_n = int(round(spec.loop_a_beats * beat_dur_a * sr))
+        t_loop_end = _beat_time(card_a, spec.cue_out_beat_a + spec.loop_a_beats)
+        local_loop_sec = max(0.25, t_loop_end - t_cue_a)
+        loop_n = max(512, min(ov_n, int(round(local_loop_sec * sr))))
         seg_a_full[:, pre_n : pre_n + ov_n] = _build_beat_exact_loop(
             seg_a_full[:, pre_n : pre_n + ov_n],
             loop_n,
