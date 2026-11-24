@@ -164,3 +164,61 @@ def test_cdj_loop_and_echo_out_primitives() -> None:
     assert plan.hold_a_stem == "loop_all"
     assert plan.exit_fx == "hpf_echo_out"
 
+
+def test_composable_cdj_dsl_execution() -> None:
+    """Composable CDJ DSL executes simple drop-swap and complex B-tease+reverb+echo programs."""
+    import numpy as np
+
+    from ai_dj.audio.cdj_dsl import (
+        DeckLoop,
+        apply_deck_loop,
+        build_b_tease_acapella_bridge_dsl,
+        build_drop_swap_dsl,
+        execute_cdj_program,
+    )
+
+    sr = 22050
+    beat_dur = 0.5
+    ov_n = int(round(32 * beat_dur * sr))
+    t = np.arange(ov_n, dtype=np.float32) / sr
+
+    def _fake_stems(f_base: float) -> dict[str, np.ndarray]:
+        sig = np.vstack([np.sin(2.0 * np.pi * f_base * t), np.sin(2.0 * np.pi * (f_base + 5) * t)])
+        return {
+            "drums": (0.4 * sig).astype(np.float32),
+            "bass": (0.3 * sig).astype(np.float32),
+            "vocals": (0.25 * sig).astype(np.float32),
+            "other": (0.25 * sig).astype(np.float32),
+        }
+
+    stems_a = _fake_stems(220.0)
+    stems_b = _fake_stems(330.0)
+
+    # 1. Complex Deck B tease loop + acapella bridge + reverb wash + echo-out
+    prog_complex = build_b_tease_acapella_bridge_dsl(overlap_beats=32)
+    assert prog_complex.deck_b.loop is not None
+    looped_b = apply_deck_loop(
+        stems_b["drums"], DeckLoop(length_beats=4, end_beat=16.0), sr, beat_dur
+    )
+    assert looped_b.shape == stems_b["drums"].shape and np.isfinite(looped_b).all()
+
+    ra, rb, da, db, ha, hb = execute_cdj_program(prog_complex, stems_a, stems_b, sr, beat_dur)
+    for arr in (ra, rb, da, db, ha, hb):
+        assert arr.shape == (2, ov_n)
+        assert np.isfinite(arr).all()
+    # Deck A should be dominant early, Deck B dominant late
+    assert float(np.sqrt(np.mean(ra[:, : sr * 2] ** 2))) > float(
+        np.sqrt(np.mean(ra[:, -sr * 2 :] ** 2))
+    )
+    assert float(np.sqrt(np.mean(rb[:, -sr * 2 :] ** 2))) > float(
+        np.sqrt(np.mean(rb[:, : sr * 2] ** 2))
+    )
+
+    # 2. Simple phrase drop-swap
+    prog_simple = build_drop_swap_dsl(overlap_beats=16)
+    ov_16 = int(round(16 * beat_dur * sr))
+    sa16 = {k: v[:, :ov_16] for k, v in stems_a.items()}
+    sb16 = {k: v[:, :ov_16] for k, v in stems_b.items()}
+    ra2, rb2, *_ = execute_cdj_program(prog_simple, sa16, sb16, sr, beat_dur)
+    assert ra2.shape == (2, ov_16) and rb2.shape == (2, ov_16)
+    assert np.isfinite(ra2).all() and np.isfinite(rb2).all()

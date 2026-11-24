@@ -15,6 +15,7 @@ from pydantic import BaseModel, Field
 from scipy.signal import butter, sosfiltfilt
 
 from ai_dj.audio.analyzer import AudioTrackCard, load_audio_mono, load_audio_stereo
+from ai_dj.audio.cdj_dsl import CDJProgram, apply_deck_loop, execute_cdj_program
 
 RenderStyle = Literal[
     "quick_cut",
@@ -46,6 +47,8 @@ class RenderSpec(BaseModel):
     loop_a_tighten: bool = False
     hold_a_stem: Literal["none", "vocals", "harmony", "loop_all"] = "none"
     exit_fx: Literal["none", "hpf_sweep", "echo_out", "hpf_echo_out"] = "none"
+    # Optional composable beat-indexed CDJ DSL program (overrides fixed transition styles)
+    dsl_program: CDJProgram | None = None
     context_beats: int = Field(default=16, ge=4, le=32)
     target_lufs: float = -14.0
     # Defect-injection hooks (used by the Defect Gym; always 0 / True in normal rendering)
@@ -459,7 +462,14 @@ def render_transition(
     seg_a_full = normalize_lufs(seg_a_full, sr, spec.target_lufs)
 
     # Optional real CDJ Deck A beat-exact loop at the mix tempo (stays locked to stretched Deck B)
-    if spec.loop_a_beats > 0 and spec.loop_a_beats < spec.overlap_beats:
+    if spec.dsl_program is not None and spec.dsl_program.deck_a.loop is not None:
+        seg_a_full[:, pre_n : pre_n + ov_n] = apply_deck_loop(
+            seg_a_full[:, pre_n : pre_n + ov_n],
+            spec.dsl_program.deck_a.loop,
+            sr,
+            beat_dur_a,
+        )
+    elif spec.loop_a_beats > 0 and spec.loop_a_beats < spec.overlap_beats:
         loop_n = max(512, min(ov_n, int(round(spec.loop_a_beats * beat_dur_a * sr))))
         seg_a_full[:, pre_n : pre_n + ov_n] = _build_beat_exact_loop(
             seg_a_full[:, pre_n : pre_n + ov_n],
@@ -502,6 +512,9 @@ def render_transition(
     # Split overlap segments into 3 zero-phase EQ bands
     ov_a = seg_a_full[:, pre_n : pre_n + ov_n]
     ov_b = seg_b_full[:, :ov_n]
+    if spec.dsl_program is not None and spec.dsl_program.deck_b.loop is not None:
+        ov_b = apply_deck_loop(ov_b, spec.dsl_program.deck_b.loop, sr, beat_dur_a)
+        seg_b_full[:, :ov_n] = ov_b
     low_a, mid_a, high_a = split_three_band(ov_a, sr)
     low_b, mid_b, high_b = split_three_band(ov_b, sr)
 
@@ -522,7 +535,57 @@ def render_transition(
     rendered_b_drums_ov: np.ndarray | None = None
     rendered_a_harm_ov: np.ndarray | None = None
     rendered_b_harm_ov: np.ndarray | None = None
-    if spec.transition_style == "quick_cut":
+    if spec.dsl_program is not None:
+        # Execute composable beat-indexed CDJ DSL program (4-stem Demucs or fast HPSS proxy)
+        stems_a: dict[str, np.ndarray] | None = None
+        stems_b: dict[str, np.ndarray] | None = None
+        if use_demucs:
+            try:
+                from ai_dj.audio.stems import separate_four_stems
+
+                stems_a = separate_four_stems(ov_a, sr)
+                stems_b = separate_four_stems(ov_b, sr)
+            except ImportError:
+                stems_a = None
+                stems_b = None
+        if stems_a is None or stems_b is None:
+            # Fast 4-stem proxy from HPSS + low/mid/high split for GRPO rollouts
+            a_h_sig = np.vstack([librosa.effects.harmonic(ch) for ch in ov_a]).astype(np.float32)
+            b_h_sig = np.vstack([librosa.effects.harmonic(ch) for ch in ov_b]).astype(np.float32)
+            a_p_sig = (ov_a - a_h_sig).astype(np.float32)
+            b_p_sig = (ov_b - b_h_sig).astype(np.float32)
+            a_hl, a_hm, a_hh = split_three_band(a_h_sig, sr, low_hz=200.0, high_hz=3500.0)
+            b_hl, b_hm, b_hh = split_three_band(b_h_sig, sr, low_hz=200.0, high_hz=3500.0)
+            stems_a = {
+                "drums": a_p_sig,
+                "bass": a_hl.astype(np.float32),
+                "vocals": a_hm.astype(np.float32),
+                "other": a_hh.astype(np.float32),
+            }
+            stems_b = {
+                "drums": b_p_sig,
+                "bass": b_hl.astype(np.float32),
+                "vocals": b_hm.astype(np.float32),
+                "other": b_hh.astype(np.float32),
+            }
+        (
+            rendered_a_ov,
+            rendered_b_ov,
+            rendered_a_drums_ov,
+            rendered_b_drums_ov,
+            rendered_a_harm_ov,
+            rendered_b_harm_ov,
+        ) = execute_cdj_program(spec.dsl_program, stems_a, stems_b, sr, beat_dur_a)
+        edge_w = max(0.02, min(0.06, beat_dur_a / max(ov_sec, 1e-3)))
+        in_blend = _smoothstep(t / edge_w)
+        out_blend = _smoothstep((1.0 - t) / edge_w)
+        stem_mix = rendered_a_ov + rendered_b_ov
+        ov_mix = (
+            ov_a * (1.0 - in_blend)
+            + stem_mix * (in_blend * out_blend)
+            + ov_b * (1.0 - out_blend)
+        ).astype(np.float32)
+    elif spec.transition_style == "quick_cut":
         # Phrase-aligned 2-beat cut with a brief click-free high-pass exit tail on Track A
         cut_n = min(ov_n, max(256, int(round(2.0 * beat_dur_a * sr))))
         ramp = _smoothstep(np.linspace(0.0, 1.0, cut_n, dtype=np.float64))

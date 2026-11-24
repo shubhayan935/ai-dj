@@ -670,6 +670,7 @@ def mix_song_pair(
         loop_a_tighten=plan.loop_a_tighten,
         hold_a_stem=plan.hold_a_stem,
         exit_fx=plan.exit_fx,
+        dsl_program=plan.dsl_program,
         context_beats=16,
     )
     safe_lbl = _safe_filename_part(label)

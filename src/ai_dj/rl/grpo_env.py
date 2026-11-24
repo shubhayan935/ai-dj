@@ -15,6 +15,7 @@ from ai_dj.audio.analyzer import (
     camelot_distance,
     timbre_cosine_similarity,
 )
+from ai_dj.audio.cdj_dsl import CDJProgram
 from ai_dj.audio.renderer import RenderSpec, render_transition
 from ai_dj.audio.verifier import verify_transition
 from ai_dj.training.prompts import _extract_json_object
@@ -80,6 +81,7 @@ class CreativeMixPlan:
     loop_a_tighten: bool = False
     hold_a_stem: Literal["none", "vocals", "harmony", "loop_all"] = "none"
     exit_fx: Literal["none", "hpf_sweep", "echo_out", "hpf_echo_out"] = "none"
+    dsl_program: CDJProgram | None = None
 
 
 @dataclass(frozen=True)
@@ -353,6 +355,13 @@ def parse_creative_plan(
     raw_fx = str(obj.get("exit_fx", "none") or "none").strip().lower()
     exit_fx = raw_fx if raw_fx in ("none", "hpf_sweep", "echo_out", "hpf_echo_out") else "none"
 
+    dsl_prog: CDJProgram | None = None
+    if isinstance(obj.get("dsl_program"), dict):
+        try:
+            dsl_prog = CDJProgram.model_validate(obj["dsl_program"])
+        except Exception:
+            dsl_prog = None
+
     return (
         CreativeMixPlan(
             next_track_id=tid,
@@ -369,6 +378,7 @@ def parse_creative_plan(
             loop_a_tighten=loop_tighten,
             hold_a_stem=hold_a,  # type: ignore[arg-type]
             exit_fx=exit_fx,  # type: ignore[arg-type]
+            dsl_program=dsl_prog,
         ),
         None,
     )
@@ -583,6 +593,7 @@ def score_creative_plan(
             loop_a_tighten=plan.loop_a_tighten,
             hold_a_stem=plan.hold_a_stem,
             exit_fx=plan.exit_fx,
+            dsl_program=plan.dsl_program,
             context_beats=12,
         )
         try:
