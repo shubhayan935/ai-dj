@@ -458,3 +458,147 @@ def build_commercial_benchmark(
         ],
         "benchmark_pairs": len(pairs),
     }
+
+
+def _map_mixesdb_to_dsp_plan(rec: dict[str, Any]) -> dict[str, Any]:
+    """Convert a real MixesDB house transition into our executable parametric mix schema."""
+    plan = rec.get("plan") or {}
+    prev_t = rec.get("prev_track") or {}
+    next_t = rec.get("next_track") or {}
+    bpm_delta_abs = abs(float(rec.get("bpm_delta") or 0.0))
+    raw_ov = float(plan.get("overlap_beats") or 32.0)
+    ov = int(max(8, min(64, round(raw_ov / 8.0) * 8)))
+
+    n_beats_prev = max(32, int(prev_t.get("beat_count") or 512))
+    n_beats_next = max(32, int(next_t.get("beat_count") or 512))
+    raw_cue_out = int(round(float(plan.get("track_cue_out_beat_prev") or (n_beats_prev - ov - 8))))
+    cue_out = max(16, min(n_beats_prev - ov - 4, raw_cue_out))
+    raw_cue_in = int(round(float(plan.get("track_cue_in_beat_next") or 0)))
+    cue_in = max(0, min(max(0, n_beats_next - ov - 4), raw_cue_in))
+
+    raw_style = str(plan.get("transition_style") or "standard_blend")
+    tid_str = str(rec.get("tran_id") or "")
+    tid_bit = int(hashlib.sha256(f"style:{tid_str}".encode()).hexdigest()[:8], 16) % 2
+    if bpm_delta_abs > 5.0 or ov <= 8:
+        style = "quick_cut"
+        ov = 8
+        auto = (0.50, 0.35, 0.35, 0.40, 0.50)
+    elif raw_style in ("long_blend", "extended_overlay") or ov >= 48:
+        style = "long_blend"
+        auto = (0.50, 0.50, 0.72, 0.20, 0.58)
+    elif raw_style == "short_blend" or ov <= 24:
+        if bpm_delta_abs >= 2.5:
+            style = "filter_sweep"
+            auto = (0.50, 0.40, 0.52, 0.32, 0.58)
+        else:
+            style = "bass_swap"
+            auto = (0.50, 0.45, 0.62, 0.25, 0.55)
+    else:
+        if bpm_delta_abs >= 1.5 or tid_bit == 0:
+            style = "stem_strip_blend"
+            auto = (0.50, 0.42, 0.45, 0.48, 0.60)
+        else:
+            style = "bass_swap"
+            auto = (0.50, 0.45, 0.62, 0.25, 0.55)
+
+    return {
+        "next_track_id": str(next_t.get("track_id") or "next_track"),
+        "transition_style": style,
+        "overlap_beats": ov,
+        "cue_out_beat_prev": cue_out,
+        "cue_in_beat_next": cue_in,
+        "bass_swap_beat_frac": auto[0],
+        "hat_morph_end_frac": auto[1],
+        "harmony_strip_a_end_frac": auto[2],
+        "harmony_entry_b_start_frac": auto[3],
+        "vocal_entry_b_start_frac": auto[4],
+    }
+
+
+def export_stage1_house_sft_chat(
+    djmix_house_dir: Path,
+    out_dir: Path,
+    *,
+    dj_dropout: float = 0.30,
+) -> dict[str, Any]:
+    """Export all MixesDB house train/val/test transitions to Inkling-Small SFT chat JSONL."""
+    from ai_dj.rl.audio_native import AUDIO_NATIVE_SYSTEM_PROMPT
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    split_stats: dict[str, Any] = {}
+
+    for sp in ("train", "val", "test"):
+        src = djmix_house_dir / f"house_transitions_{sp}.jsonl"
+        if not src.exists():
+            continue
+        rows: list[dict[str, Any]] = []
+        style_counts: Counter[str] = Counter()
+        with src.open("r", encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                rec = json.loads(line)
+                prev_t = rec.get("prev_track") or {}
+                next_t = rec.get("next_track") or {}
+                target = _map_mixesdb_to_dsp_plan(rec)
+                style_counts[target["transition_style"]] += 1
+
+                tid = str(rec.get("tran_id") or "")
+                h = int(hashlib.sha256(f"dj_drop:{tid}".encode()).hexdigest()[:8], 16) / 0xFFFFFFFF
+                dj_line = (
+                    f"Reference DJ: {rec.get('dj_name')} "
+                    f"({', '.join((rec.get('mix_tags') or [])[:4])})\n"
+                    if h >= dj_dropout and rec.get("dj_name")
+                    else "Reference DJ: generic club house DJ\n"
+                )
+                prev_genres = ", ".join((prev_t.get("genres") or ["House"])[:4])
+                next_genres = ", ".join((next_t.get("genres") or ["House"])[:4])
+                user_prompt = (
+                    f"{dj_line}"
+                    "Plan the real-DJ house transition from Deck A to Deck B.\n\n"
+                    f"DECK A (outgoing): {prev_t.get('track_id')} | "
+                    f"{prev_t.get('artist')} - {prev_t.get('title')}\n"
+                    f"  bpm={float(prev_t.get('bpm') or 125.0):.2f} "
+                    f"stability={float(prev_t.get('bpm_stability') or 0.95):.3f} "
+                    f"duration={float(prev_t.get('duration_sec') or 300.0):.1f}s "
+                    f"total_beats={int(prev_t.get('beat_count') or 512)} "
+                    f"genres=[{prev_genres}]\n"
+                    f"DECK B (incoming): {next_t.get('track_id')} | "
+                    f"{next_t.get('artist')} - {next_t.get('title')}\n"
+                    f"  bpm={float(next_t.get('bpm') or 125.0):.2f} "
+                    f"stability={float(next_t.get('bpm_stability') or 0.95):.3f} "
+                    f"duration={float(next_t.get('duration_sec') or 300.0):.1f}s "
+                    f"total_beats={int(next_t.get('beat_count') or 512)} "
+                    f"genres=[{next_genres}]\n"
+                    f"BPM delta: {float(rec.get('bpm_delta') or 0.0):+.2f} BPM\n\n"
+                    "Return ONLY the single valid JSON mix plan."
+                )
+                rows.append(
+                    {
+                        "tran_id": tid,
+                        "split": sp,
+                        "tier": (rec.get("quality") or {}).get("tier", "silver"),
+                        "dj_name": rec.get("dj_name"),
+                        "messages": [
+                            {"role": "system", "content": AUDIO_NATIVE_SYSTEM_PROMPT},
+                            {"role": "user", "content": user_prompt},
+                            {"role": "assistant", "content": json.dumps(target)},
+                        ],
+                    }
+                )
+        out_path = out_dir / f"house_sft_{sp}_chat.jsonl"
+        with out_path.open("w", encoding="utf-8") as fh:
+            for r in rows:
+                fh.write(json.dumps(r, ensure_ascii=False) + "\n")
+        split_stats[sp] = {
+            "path": str(out_path),
+            "examples": len(rows),
+            "style_counts": dict(style_counts),
+        }
+
+    summary = {"splits": split_stats}
+    (out_dir / "house_sft_export_summary.json").write_text(
+        json.dumps(summary, indent=2), encoding="utf-8"
+    )
+    return summary
