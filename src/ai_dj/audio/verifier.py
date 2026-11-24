@@ -183,9 +183,9 @@ def verify_transition(
     # 2. Phrase-grid alignment: aligned to the track's detected bar-1 phrase phase (or % 8)
     def _is_phrase_aligned(card: AudioTrackCard, cue_beat: int) -> bool:
         if card.sections:
-            # Check exact/±1b hit on any detected phrase boundary, or same 8-beat phrase phase
+            # Check exact hit on any detected phrase boundary, or same 8-beat phrase phase
             for sec in card.sections:
-                if abs(cue_beat - sec.start_beat) <= 1:
+                if cue_beat == sec.start_beat:
                     return True
             phase = card.sections[1].start_beat % 8 if len(card.sections) > 1 else 0
             return ((cue_beat - phase) % 8) == 0
