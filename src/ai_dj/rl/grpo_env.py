@@ -76,6 +76,10 @@ class CreativeMixPlan:
     harmony_strip_a_end_frac: float | None = None
     harmony_entry_b_start_frac: float | None = None
     vocal_entry_b_start_frac: float | None = None
+    loop_a_beats: int = 0
+    loop_a_tighten: bool = False
+    hold_a_stem: Literal["none", "vocals", "harmony", "loop_all"] = "none"
+    exit_fx: Literal["none", "hpf_sweep", "echo_out", "hpf_echo_out"] = "none"
 
 
 @dataclass(frozen=True)
@@ -335,6 +339,20 @@ def parse_creative_plan(
         except (TypeError, ValueError):
             return None
 
+    raw_loop = obj.get("loop_a_beats", 0)
+    try:
+        loop_a = int(raw_loop) if raw_loop is not None else 0
+    except (TypeError, ValueError):
+        loop_a = 0
+    loop_a = loop_a if loop_a in (0, 4, 8, 16) else 0
+    loop_tighten = bool(obj.get("loop_a_tighten", False))
+
+    raw_hold = str(obj.get("hold_a_stem", "none") or "none").strip().lower()
+    hold_a = raw_hold if raw_hold in ("none", "vocals", "harmony", "loop_all") else "none"
+
+    raw_fx = str(obj.get("exit_fx", "none") or "none").strip().lower()
+    exit_fx = raw_fx if raw_fx in ("none", "hpf_sweep", "echo_out", "hpf_echo_out") else "none"
+
     return (
         CreativeMixPlan(
             next_track_id=tid,
@@ -347,6 +365,10 @@ def parse_creative_plan(
             harmony_strip_a_end_frac=_opt_frac("harmony_strip_a_end_frac", 0.15, 0.95),
             harmony_entry_b_start_frac=_opt_frac("harmony_entry_b_start_frac", 0.05, 0.85),
             vocal_entry_b_start_frac=_opt_frac("vocal_entry_b_start_frac", 0.15, 0.90),
+            loop_a_beats=loop_a,
+            loop_a_tighten=loop_tighten,
+            hold_a_stem=hold_a,  # type: ignore[arg-type]
+            exit_fx=exit_fx,  # type: ignore[arg-type]
         ),
         None,
     )
@@ -557,6 +579,10 @@ def score_creative_plan(
             harmony_strip_a_end_frac=plan.harmony_strip_a_end_frac,
             harmony_entry_b_start_frac=plan.harmony_entry_b_start_frac,
             vocal_entry_b_start_frac=plan.vocal_entry_b_start_frac,
+            loop_a_beats=plan.loop_a_beats,
+            loop_a_tighten=plan.loop_a_tighten,
+            hold_a_stem=plan.hold_a_stem,
+            exit_fx=plan.exit_fx,
             context_beats=12,
         )
         try:

@@ -666,6 +666,10 @@ def mix_song_pair(
         harmony_strip_a_end_frac=plan.harmony_strip_a_end_frac,
         harmony_entry_b_start_frac=plan.harmony_entry_b_start_frac,
         vocal_entry_b_start_frac=plan.vocal_entry_b_start_frac,
+        loop_a_beats=plan.loop_a_beats,
+        loop_a_tighten=plan.loop_a_tighten,
+        hold_a_stem=plan.hold_a_stem,
+        exit_fx=plan.exit_fx,
         context_beats=16,
     )
     safe_lbl = _safe_filename_part(label)

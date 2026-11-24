@@ -41,6 +41,11 @@ class RenderSpec(BaseModel):
     harmony_strip_a_end_frac: float | None = Field(default=None, ge=0.15, le=0.95)
     harmony_entry_b_start_frac: float | None = Field(default=None, ge=0.05, le=0.85)
     vocal_entry_b_start_frac: float | None = Field(default=None, ge=0.15, le=0.90)
+    # Real CDJ deck primitives: Deck A beat-exact loop, stem-hold phrasing, and exit FX
+    loop_a_beats: int = Field(default=0, ge=0, le=32)
+    loop_a_tighten: bool = False
+    hold_a_stem: Literal["none", "vocals", "harmony", "loop_all"] = "none"
+    exit_fx: Literal["none", "hpf_sweep", "echo_out", "hpf_echo_out"] = "none"
     context_beats: int = Field(default=16, ge=4, le=32)
     target_lufs: float = -14.0
     # Defect-injection hooks (used by the Defect Gym; always 0 / True in normal rendering)
@@ -197,6 +202,90 @@ def _time_stretch_wsola(y: np.ndarray, sr: int, rate: float) -> np.ndarray:
     return stretched if is_stereo else stretched[0]
 
 
+def _build_beat_exact_loop(
+    ov_a: np.ndarray,
+    loop_samples: int,
+    total_samples: int,
+    sr: int,
+    *,
+    tighten: bool = False,
+) -> np.ndarray:
+    """Repeat a beat-exact Deck A loop across the overlap with click-free 8 ms splices."""
+    n_ch = ov_a.shape[0]
+    loop_n = max(512, min(loop_samples, ov_a.shape[1]))
+    xfade = min(int(round(0.008 * sr)), loop_n // 8)
+    out = np.zeros((n_ch, total_samples), dtype=np.float32)
+
+    pos = 0
+    cur_len = loop_n
+    while pos < total_samples:
+        # Optional DJ tension tighten: halve loop length in the last 30% of the overlap
+        if tighten and pos >= int(0.68 * total_samples) and cur_len >= 1024:
+            target_len = loop_n // 2 if pos < int(0.84 * total_samples) else max(512, loop_n // 4)
+            cur_len = max(512, min(loop_n, target_len))
+        chunk = ov_a[:, :cur_len].copy()
+        take = min(cur_len, total_samples - pos)
+        if pos > 0 and xfade > 4 and take > xfade:
+            fade = np.linspace(0.0, 1.0, xfade, dtype=np.float32)
+            out[:, pos : pos + xfade] = (
+                out[:, pos : pos + xfade] * (1.0 - fade) + chunk[:, :xfade] * fade
+            )
+            out[:, pos + xfade : pos + take] = chunk[:, xfade:take]
+        else:
+            out[:, pos : pos + take] = chunk[:, :take]
+        pos += cur_len
+    return out
+
+
+def _apply_beat_synced_echo_out(
+    sig: np.ndarray,
+    sr: int,
+    beat_dur_sec: float,
+    cut_frac: float,
+    *,
+    feedback: float = 0.52,
+    delay_beats: float = 0.75,
+    hpf_hz: float = 380.0,
+) -> np.ndarray:
+    """Club Pioneer-style beat-synced dotted-eighth echo-out right at `cut_frac`."""
+    n = sig.shape[1]
+    cut_idx = max(1, min(n - 1, int(round(cut_frac * n))))
+    delay_n = max(64, int(round(delay_beats * beat_dur_sec * sr)))
+    # Smooth 35 ms dry mute right on the downbeat cut
+    mute_n = min(int(round(0.035 * sr)), n - cut_idx)
+    dry = sig.copy()
+    if mute_n > 1:
+        dry[:, cut_idx : cut_idx + mute_n] *= np.linspace(1.0, 0.0, mute_n, dtype=np.float32)
+    dry[:, cut_idx + mute_n :] = 0.0
+
+    # Capture 2-beat window right before the cut, band-limit it, and build decaying echoes
+    tap_len = min(cut_idx, int(round(2.0 * beat_dur_sec * sr)))
+    src = sig[:, cut_idx - tap_len : cut_idx].astype(np.float64)
+    if src.shape[1] > 32 and hpf_hz > 20.0:
+        sos = butter(2, min(hpf_hz / (0.5 * sr), 0.9), btype="highpass", output="sos")
+        src = sosfiltfilt(sos, src, axis=-1)
+    # Gentle fade-in on the captured echo source to prevent edge clicks
+    edge = min(int(round(0.015 * sr)), src.shape[1] // 4)
+    if edge > 1:
+        src[:, :edge] *= np.linspace(0.0, 1.0, edge, dtype=np.float64)
+
+    wet = np.zeros_like(dry, dtype=np.float64)
+    gain = feedback
+    for rep in range(1, 7):
+        start = cut_idx + (rep - 1) * delay_n
+        if start >= n or gain < 0.04:
+            break
+        take = min(src.shape[1], n - start)
+        # Subtle stereo ping-pong alternation when 2 channels
+        if wet.shape[0] == 2:
+            pan = np.array([[1.0], [0.72]]) if rep % 2 == 1 else np.array([[0.72], [1.0]])
+            wet[:, start : start + take] += gain * pan * src[:, :take]
+        else:
+            wet[:, start : start + take] += gain * src[:, :take]
+        gain *= feedback
+    return (dry + wet.astype(np.float32)).astype(np.float32)
+
+
 def _phase_align_shift_samples(
     ov_a_mono: np.ndarray,
     ov_b_mono: np.ndarray,
@@ -221,6 +310,26 @@ def _phase_align_shift_samples(
         ka, kb = low_a, low_b
     else:
         ka, kb = ov_a_mono, ov_b_mono
+
+    # When the overlap is long (>8s), lock onto the strongest joint kick-energy 6s window
+    # so quiet intros/breakdowns at one end do not bias the kick alignment.
+    n_samp = min(len(ka), len(kb))
+    win_samp = int(6.0 * sr)
+    if n_samp > int(8.0 * sr) and win_samp < n_samp:
+        step_samp = int(1.0 * sr)
+        best_s = 0
+        best_e = -1.0
+        for s0 in range(0, n_samp - win_samp + 1, step_samp):
+            ea = float(np.sqrt(np.mean(ka[s0 : s0 + win_samp] ** 2)))
+            eb = float(np.sqrt(np.mean(kb[s0 : s0 + win_samp] ** 2)))
+            joint = min(ea, eb)
+            if joint > best_e:
+                best_e = joint
+                best_s = s0
+        if best_e >= 1e-4:
+            ka = ka[best_s : best_s + win_samp]
+            kb = kb[best_s : best_s + win_samp]
+
     env_a = librosa.onset.onset_strength(y=ka, sr=sr, hop_length=hop)
     env_b = librosa.onset.onset_strength(y=kb, sr=sr, hop_length=hop)
     n = min(len(env_a), len(env_b))
@@ -339,6 +448,17 @@ def render_transition(
     avail_a = min(src_a.shape[1], seg_a_full.shape[1] - offset_a)
     seg_a_full[:, offset_a : offset_a + avail_a] = src_a[:, :avail_a]
     seg_a_full = normalize_lufs(seg_a_full, sr, spec.target_lufs)
+
+    # Optional real CDJ Deck A beat-exact loop across the overlap
+    if spec.loop_a_beats > 0 and spec.loop_a_beats < spec.overlap_beats:
+        loop_n = int(round(spec.loop_a_beats * beat_dur_a * sr))
+        seg_a_full[:, pre_n : pre_n + ov_n] = _build_beat_exact_loop(
+            seg_a_full[:, pre_n : pre_n + ov_n],
+            loop_n,
+            ov_n,
+            sr,
+            tighten=spec.loop_a_tighten,
+        )
 
     # Extract Track B with a 1-beat lookbehind margin so post-stretch phase-lock can shift cleanly
     lead_in_orig = min(int(round(t_cue_b * sr)), int(round(beat_dur_b * sr)))
@@ -584,6 +704,68 @@ def render_transition(
 
             a_h = stems_a["other"] * g_a_oth + stems_a["vocals"] * g_a_voc
             b_h = stems_b["other"] * g_b_oth + stems_b["vocals"] * g_b_voc
+
+            # Real CDJ stem-hold + phrase-downbeat exit FX (breaks monotonic crossfade)
+            if spec.hold_a_stem != "none" or spec.exit_fx != "none":
+                cut_frac = min(0.88, max(swap_frac + 0.12, 0.75))
+                cut_w = max(0.02, beat_dur_a / max(ov_sec, 1e-3))
+                if spec.hold_a_stem == "vocals":
+                    # Hold Track A's vocals at 100% over B's drum morph until phrase cutover
+                    v_src = stems_a["vocals"].astype(np.float32)
+                    if spec.exit_fx in ("hpf_sweep", "hpf_echo_out"):
+                        v_hp = _apply_filter_sweep(
+                            v_src, sr, btype="highpass", start_hz=120.0, end_hz=1500.0
+                        )
+                        wet_r = _smoothstep((t - 0.35) / 0.40)
+                        v_src = (v_src * (1.0 - wet_r) + v_hp * wet_r).astype(np.float32)
+                    if spec.exit_fx in ("echo_out", "hpf_echo_out"):
+                        held_v = _apply_beat_synced_echo_out(v_src, sr, beat_dur_a, cut_frac)
+                    else:
+                        v_env = np.cos(0.5 * np.pi * _smoothstep((t - (cut_frac - cut_w)) / cut_w))
+                        held_v = (v_src * v_env).astype(np.float32)
+                    a_h = stems_a["other"] * g_a_oth + held_v
+                elif spec.hold_a_stem == "harmony":
+                    # Hold Track A's synth/melody hook over B's drum morph, then sweep + echo out
+                    h_src = stems_a["other"].astype(np.float32)
+                    if spec.exit_fx in ("hpf_sweep", "hpf_echo_out"):
+                        h_hp = _apply_filter_sweep(
+                            h_src, sr, btype="highpass", start_hz=140.0, end_hz=2200.0
+                        )
+                        wet_r = _smoothstep((t - 0.30) / 0.45)
+                        h_src = (h_src * (1.0 - wet_r) + h_hp * wet_r).astype(np.float32)
+                    if spec.exit_fx in ("echo_out", "hpf_echo_out"):
+                        held_h = _apply_beat_synced_echo_out(h_src, sr, beat_dur_a, cut_frac)
+                    else:
+                        h_env = np.cos(0.5 * np.pi * _smoothstep((t - (cut_frac - cut_w)) / cut_w))
+                        held_h = (h_src * h_env).astype(np.float32)
+                    a_h = held_h + stems_a["vocals"] * g_a_voc
+                elif spec.hold_a_stem == "loop_all":
+                    # Keep A's melodic+vocal hook prominent inside the loop while B's drums morph
+                    # in underneath, then HPF sweep + beat-synced echo-out on B's phrase downbeat!
+                    hook_src = (stems_a["other"] + stems_a["vocals"]).astype(np.float32)
+                    if spec.exit_fx in ("hpf_sweep", "hpf_echo_out"):
+                        hook_hp = _apply_filter_sweep(
+                            hook_src, sr, btype="highpass", start_hz=150.0, end_hz=2400.0
+                        )
+                        wet_r = _smoothstep((t - 0.30) / 0.45)
+                        hook_src = (hook_src * (1.0 - wet_r) + hook_hp * wet_r).astype(np.float32)
+                    if spec.exit_fx in ("echo_out", "hpf_echo_out"):
+                        a_h = _apply_beat_synced_echo_out(hook_src, sr, beat_dur_a, cut_frac)
+                    else:
+                        c_env = np.cos(0.5 * np.pi * _smoothstep((t - (cut_frac - cut_w)) / cut_w))
+                        a_h = (hook_src * c_env).astype(np.float32)
+                elif spec.exit_fx in ("echo_out", "hpf_echo_out"):
+                    a_h_in = a_h.astype(np.float32)
+                    if spec.exit_fx == "hpf_echo_out":
+                        a_h_in = _apply_filter_sweep(
+                            a_h_in, sr, btype="highpass", start_hz=120.0, end_hz=1800.0
+                        ).astype(np.float32)
+                    a_h = _apply_beat_synced_echo_out(a_h_in, sr, beat_dur_a, max(0.55, swap_frac))
+                elif spec.exit_fx == "hpf_sweep":
+                    a_h = _apply_filter_sweep(
+                        a_h.astype(np.float32), sr, btype="highpass", start_hz=120.0, end_hz=1800.0
+                    )
+
             rendered_a_ov = (a_d + stems_a["bass"] * g_a_bass + a_h).astype(np.float32)
             rendered_b_ov = (b_d + stems_b["bass"] * g_b_bass + b_h).astype(np.float32)
             rendered_a_drums_ov = a_d.astype(np.float32)

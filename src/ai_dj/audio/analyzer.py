@@ -328,18 +328,59 @@ def segment_track_sections(
     if n_beats < 32 or len(y) < sr * 4:
         return []
 
-    # Aim for ~8–14 structural phrases per full song
+    # Low-band (<200 Hz) signal for per-section bass density & phrase-phase alignment
+    sos_low = butter(4, min(200.0, sr * 0.45) / (sr / 2.0), btype="low", output="sos")
+    y_low = sosfiltfilt(sos_low, y.astype(np.float64))
+
+    # Find the song's true bar-1 / 8-bar phrase phase offset using beat-sync energy novelty
+    # instead of slicing blindly at beat 0, 32, 64...
     phrase_beats = 64 if n_beats >= 512 else 32
-    boundaries = list(range(0, n_beats, phrase_beats))
+    beat_rms = np.zeros(n_beats, dtype=np.float64)
+    beat_low = np.zeros(n_beats, dtype=np.float64)
+    for bi in range(n_beats - 1):
+        s0 = int(beat_times[bi] * sr)
+        s1 = min(len(y), int(beat_times[bi + 1] * sr))
+        if s1 > s0 + 16:
+            beat_rms[bi] = float(np.sqrt(np.mean(y[s0:s1].astype(np.float64) ** 2)))
+            beat_low[bi] = float(np.sqrt(np.mean(y_low[s0:s1] ** 2)))
+    win = 16
+    novelty = np.zeros(n_beats, dtype=np.float64)
+    for bi in range(win, n_beats - win):
+        d_rms = abs(float(np.mean(beat_rms[bi : bi + win]) - np.mean(beat_rms[bi - win : bi])))
+        d_low = abs(float(np.mean(beat_low[bi : bi + win]) - np.mean(beat_low[bi - win : bi])))
+        novelty[bi] = d_rms + 1.5 * d_low
+
+    best_phase = 0
+    best_phase_score = -1.0
+    for phase in range(min(32, max(1, n_beats // 4))):
+        pts = list(range(phase, n_beats, 32))
+        if len(pts) < 2:
+            continue
+        score = float(np.sum(novelty[pts]))
+        if score > best_phase_score:
+            best_phase_score = score
+            best_phase = phase
+
+    boundaries: list[int] = [0]
+    first_b = best_phase if best_phase >= 16 else (best_phase + 32)
+    cur = first_b
+    while cur < n_beats - 16:
+        # Snap to strongest novelty within ±1 beat of the 32/64-beat phrase grid
+        step = phrase_beats
+        if phrase_beats == 64 and cur + 32 < n_beats - 16:
+            # Allow a 32-beat phrase split when there is a major structural change halfway
+            mid_nov = float(novelty[cur + 32])
+            if mid_nov > float(np.percentile(novelty[win : n_beats - win], 82)):
+                step = 32
+        boundaries.append(cur)
+        cur += step
+    if len(boundaries) < 2:
+        boundaries = list(range(0, n_beats, phrase_beats))
     if len(boundaries) < 2:
         return []
     # Merge short (<16 beat) trailing tails into the preceding final section
     if (n_beats - 1) - boundaries[-1] < 16:
         boundaries.pop()
-
-    # Low-band (<200 Hz) signal for per-section bass density
-    sos_low = butter(4, min(200.0, sr * 0.45) / (sr / 2.0), btype="low", output="sos")
-    y_low = sosfiltfilt(sos_low, y.astype(np.float64))
 
     if onset_env is None:
         onset_env = librosa.onset.onset_strength(y=y, sr=sr, hop_length=onset_hop_length)

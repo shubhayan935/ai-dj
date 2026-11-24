@@ -39,11 +39,21 @@ AUDIO_NATIVE_SYSTEM_PROMPT = (
     "harmony_strip_a_end_frac when keys are distant; 0.10-0.25 when keys match).\n"
     '- "vocal_entry_b_start_frac": fraction when B\'s vocals enter (after A\'s vocals clear, '
     "typically 0.50-0.65).\n"
+    "CDJ phrasing & loop primitives (use to avoid plain volume crossfades):\n"
+    '- "loop_a_beats": 0 (off) or 4, 8, 16 to loop a beat-exact phrase/hook of Deck A while '
+    "bringing in Deck B's drums underneath.\n"
+    '- "loop_a_tighten": true/false — halve Deck A\'s loop (16->8->4) in the final bars for '
+    "tension before cutover.\n"
+    '- "hold_a_stem": "none", "vocals" (keep A\'s vocal riding over B\'s beat), "harmony" '
+    '(hold A\'s synth hook), or "loop_all" (hold A\'s looped hook until B\'s phrase downbeat).\n'
+    '- "exit_fx": "none", "hpf_sweep", "echo_out", or "hpf_echo_out" (beat-synced echo tail '
+    "on A's exit right into B's phrase downbeat).\n"
     "Respond with ONLY a single valid JSON object with keys in order: "
     '"next_track_id", "transition_style", "overlap_beats", '
     '"cue_out_beat_prev", "cue_in_beat_next", "bass_swap_beat_frac", '
     '"hat_morph_end_frac", "harmony_strip_a_end_frac", '
-    '"harmony_entry_b_start_frac", "vocal_entry_b_start_frac".'
+    '"harmony_entry_b_start_frac", "vocal_entry_b_start_frac", '
+    '"loop_a_beats", "loop_a_tighten", "hold_a_stem", "exit_fx".'
 )
 
 

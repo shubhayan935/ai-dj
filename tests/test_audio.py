@@ -112,3 +112,55 @@ def test_psychoacoustic_critic_detects_harmonic_clash_and_dual_drums() -> None:
     assert crit_good.peak_harmonic_clash < 0.05
     assert crit_good.peak_dual_drum_overlap < 0.05
     assert crit_good.naturalness_score > crit_bad.naturalness_score
+
+
+def test_cdj_loop_and_echo_out_primitives() -> None:
+    """Beat-exact Deck A looping & echo-out produce periodic loops and decaying tails."""
+    import numpy as np
+
+    from ai_dj.audio.renderer import _apply_beat_synced_echo_out, _build_beat_exact_loop
+    from ai_dj.rl.grpo_env import parse_creative_plan
+
+    sr = 22050
+    beat_dur = 0.5  # 120 BPM
+    loop_n = int(round(4 * beat_dur * sr))  # 4-beat loop
+    total_n = loop_n * 4
+    t = np.arange(total_n, dtype=np.float32) / sr
+    src = np.vstack([np.sin(2.0 * np.pi * 220.0 * t), np.sin(2.0 * np.pi * 330.0 * t)])
+    # Mark a distinct impulse in beat 1 of the loop
+    src[:, 500:700] += 0.5
+
+    looped = _build_beat_exact_loop(src, loop_n, total_n, sr, tighten=False)
+    assert looped.shape == (2, total_n)
+    # Second repetition should match first repetition inside the body
+    np.testing.assert_allclose(
+        looped[:, 400:1200], looped[:, loop_n + 400 : loop_n + 1200], atol=1e-4
+    )
+
+    tight = _build_beat_exact_loop(src, loop_n, total_n, sr, tighten=True)
+    assert tight.shape == (2, total_n)
+    assert np.isfinite(tight).all()
+
+    echoed = _apply_beat_synced_echo_out(src, sr, beat_dur, cut_frac=0.5, feedback=0.55)
+    assert echoed.shape == (2, total_n)
+    assert np.isfinite(echoed).all()
+    cut_idx = total_n // 2
+    # Tail after cut_frac should have decaying echo energy (not silent, and lower than pre-cut)
+    pre_rms = float(np.sqrt(np.mean(echoed[:, :cut_idx] ** 2)))
+    post_rms = float(np.sqrt(np.mean(echoed[:, cut_idx : cut_idx + sr] ** 2)))
+    assert 0.05 * pre_rms < post_rms < 0.95 * pre_rms
+
+    # Schema parsing supports new CDJ primitives + defaults when omitted
+    raw = (
+        '{"next_track_id": "t2", "transition_style": "stem_strip_blend", '
+        '"overlap_beats": 32, "cue_out_beat_prev": 128, "cue_in_beat_next": 32, '
+        '"bass_swap_beat_frac": 0.5, "loop_a_beats": 8, "loop_a_tighten": true, '
+        '"hold_a_stem": "loop_all", "exit_fx": "hpf_echo_out"}'
+    )
+    plan, err = parse_creative_plan(raw, {"t2"})
+    assert err is None and plan is not None
+    assert plan.loop_a_beats == 8
+    assert plan.loop_a_tighten is True
+    assert plan.hold_a_stem == "loop_all"
+    assert plan.exit_fx == "hpf_echo_out"
+
