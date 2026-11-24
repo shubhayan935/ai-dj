@@ -404,7 +404,9 @@ def render_transition(
         ov_a_hp = _apply_filter_sweep(ov_a, sr, btype="highpass", start_hz=60.0, end_hz=1800.0)
         wet_in = _smoothstep(t / 0.05)
         ov_a_eff = ov_a * (1.0 - wet_in) + ov_a_hp * wet_in
-        ov_mix = (ov_a_eff * gain_a + ov_b * gain_b).astype(np.float32)
+        rendered_a_ov = (ov_a_eff * gain_a).astype(np.float32)
+        rendered_b_ov = (ov_b * gain_b).astype(np.float32)
+        ov_mix = (rendered_a_ov + rendered_b_ov).astype(np.float32)
 
     elif spec.transition_style == "filter_sweep":
         # Silky club filter transition: click-free wet/dry HPF out on A + LPF open on B + bass swap
@@ -531,7 +533,8 @@ def render_transition(
                     else min(0.85, swap_frac + 0.04)
                 )
                 if cam_dist >= 3 or a_out <= b_in:
-                    g_a_bass = np.cos(0.5 * np.pi * _smoothstep(t / max(0.15, a_out)))
+                    bass_a_end = max(0.15, min(a_out, swap_frac))
+                    g_a_bass = np.cos(0.5 * np.pi * _smoothstep(t / bass_a_end))
                     g_b_bass = np.sin(
                         0.5 * np.pi * _smoothstep((t - swap_frac) / max(0.15, 0.78 - swap_frac))
                     )
@@ -641,15 +644,17 @@ def render_transition(
                 + pb_mid * np.sin(0.5 * np.pi * s_swap)
                 + pb_hi * np.sin(0.5 * np.pi * s_hi)
             )
-            rendered_a_harm_ov = (a_harm * g_a_harm).astype(np.float32)
-            rendered_b_harm_ov = (b_harm * g_b_harm).astype(np.float32)
-            rendered_a_drums_ov = a_p.astype(np.float32)
-            rendered_b_drums_ov = b_p.astype(np.float32)
+            _, mid_ha, hi_ha = split_three_band(a_harm * g_a_harm, sr)
+            _, mid_hb, hi_hb = split_three_band(b_harm * g_b_harm, sr)
+            _, mid_pa, hi_pa = split_three_band(a_p, sr)
+            _, mid_pb, hi_pb = split_three_band(b_p, sr)
+            rendered_a_harm_ov = (mid_ha + hi_ha).astype(np.float32)
+            rendered_b_harm_ov = (mid_hb + hi_hb).astype(np.float32)
+            rendered_a_drums_ov = (low_a * gain_a_low + mid_pa + hi_pa).astype(np.float32)
+            rendered_b_drums_ov = (low_b * gain_b_low + mid_pb + hi_pb).astype(np.float32)
             rendered_a_ov = (rendered_a_harm_ov + rendered_a_drums_ov).astype(np.float32)
             rendered_b_ov = (rendered_b_harm_ov + rendered_b_drums_ov).astype(np.float32)
-            raw_blend = rendered_a_ov + rendered_b_ov
-            _, mid_m, high_m = split_three_band(raw_blend, sr)
-            ov_mix = (low_a * gain_a_low + low_b * gain_b_low + mid_m + high_m).astype(np.float32)
+            ov_mix = (rendered_a_ov + rendered_b_ov).astype(np.float32)
 
     elif spec.transition_style == "long_blend":
         # DAFx-2022 club 3-band EQ weave: highs enter early -> mids cross -> bass swap -> highs out
