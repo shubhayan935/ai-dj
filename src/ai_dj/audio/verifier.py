@@ -214,15 +214,15 @@ def verify_transition(
         spec.transition_style != "quick_cut" and drum_clash_ratio > cfg.max_drum_clash_ratio
     )
 
-    # 6c. Local 0.5s loudness discontinuity inside overlap (catches sudden cuts/jumps)
-    mono_mix = np.mean(raw_mix, axis=0) if raw_mix.ndim == 2 else raw_mix
+    # 6c. Local 0.5s stereo-energy loudness discontinuity inside overlap (catches sudden cuts/jumps)
+    n_tot = raw_mix.shape[-1]
     win_n = max(512, int(0.5 * sr))
     step_start = max(0, s0 - win_n)
-    step_end = min(len(mono_mix), s1 + win_n)
-    ov_region = mono_mix[step_start:step_end]
+    step_end = min(n_tot, s1 + win_n)
+    ov_region = raw_mix[..., step_start:step_end]
     rms_steps: list[float] = []
-    for pos in range(0, max(0, len(ov_region) - win_n + 1), win_n):
-        seg_w = ov_region[pos : pos + win_n]
+    for pos in range(0, max(0, ov_region.shape[-1] - win_n + 1), win_n):
+        seg_w = ov_region[..., pos : pos + win_n]
         rms_steps.append(20.0 * float(np.log10(np.sqrt(np.mean(seg_w**2)) + 1e-9)))
     max_step_rms_db = (
         round(max(abs(rms_steps[i] - rms_steps[i - 1]) for i in range(1, len(rms_steps))), 2)

@@ -130,15 +130,20 @@ def evaluate_transition_psychoacoustics(
     # 2. Cross-chroma harmonic clash on rendered harmonic/melodic contributions
     ha = _to_mono_f32(rendered_a_harm)[:n] if rendered_a_harm is not None else a_m
     hb = _to_mono_f32(rendered_b_harm)[:n] if rendered_b_harm is not None else b_m
-    ha_rms_ref = max(float(np.sqrt(np.mean(ha**2))), 1e-4)
-    hb_rms_ref = max(float(np.sqrt(np.mean(hb**2))), 1e-4)
+    mix_rms_ref = max(float(np.sqrt(np.mean(mix_m**2))), 1e-4)
+    harm_rms_ref = max(
+        float(np.sqrt(np.mean(ha**2))),
+        float(np.sqrt(np.mean(hb**2))),
+        mix_rms_ref * 0.5,
+        1e-4,
+    )
 
     harm_clashes: list[float] = []
     for i in range(n_frames):
         s0, s1 = i * win_n, (i + 1) * win_n
         fa, fb = ha[s0:s1], hb[s0:s1]
-        wa = min(1.0, float(np.sqrt(np.mean(fa**2))) / (ha_rms_ref * 1.2 + 1e-9))
-        wb = min(1.0, float(np.sqrt(np.mean(fb**2))) / (hb_rms_ref * 1.2 + 1e-9))
+        wa = min(1.0, float(np.sqrt(np.mean(fa**2))) / (harm_rms_ref * 1.2 + 1e-9))
+        wb = min(1.0, float(np.sqrt(np.mean(fb**2))) / (harm_rms_ref * 1.2 + 1e-9))
         co_energy = min(wa, wb)
         if co_energy < 0.08:
             harm_clashes.append(0.0)
