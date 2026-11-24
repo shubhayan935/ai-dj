@@ -55,6 +55,8 @@ class RenderResult:
     tempo_stretch_pct: float
     phase_correction_ms: float = 0.0
     out_wav: Path | None = None
+    rendered_a_overlap_stem: np.ndarray | None = None
+    rendered_b_overlap_stem: np.ndarray | None = None
 
 
 def _to_mono(y: np.ndarray) -> np.ndarray:
@@ -355,6 +357,8 @@ def render_transition(
         gain_a_low = np.ones(ov_n, dtype=np.float64)
         gain_b_low = np.ones(ov_n, dtype=np.float64)
 
+    rendered_a_ov: np.ndarray | None = None
+    rendered_b_ov: np.ndarray | None = None
     if spec.transition_style == "quick_cut":
         # Phrase-aligned 2-beat cut with a brief click-free high-pass exit tail on Track A
         cut_n = min(ov_n, max(256, int(round(2.0 * beat_dur_a * sr))))
@@ -414,14 +418,17 @@ def render_transition(
             # Only ONE track's drums + bass play at any instant (tight 2-beat swap at s_swap)
             g_a_rhythm = np.cos(0.5 * np.pi * s_swap)
             g_b_rhythm = np.sin(0.5 * np.pi * s_swap)
-            ov_mix = (
+            rendered_a_ov = (
                 (stems_a["drums"] + stems_a["bass"]) * g_a_rhythm
-                + (stems_b["drums"] + stems_b["bass"]) * g_b_rhythm
                 + stems_a["vocals"] * g_a_voc
-                + stems_b["vocals"] * g_b_voc
                 + stems_a["other"] * g_a_oth
+            ).astype(np.float32)
+            rendered_b_ov = (
+                (stems_b["drums"] + stems_b["bass"]) * g_b_rhythm
+                + stems_b["vocals"] * g_b_voc
                 + stems_b["other"] * g_b_oth
             ).astype(np.float32)
+            ov_mix = (rendered_a_ov + rendered_b_ov).astype(np.float32)
         else:
             a_harm = np.vstack([librosa.effects.harmonic(ch) for ch in ov_a])
             a_perc = ov_a - a_harm
@@ -433,9 +440,9 @@ def render_transition(
             # Tight single-kit drum swap at s_swap so two drum kits never clash
             g_a_perc = np.cos(0.5 * np.pi * s_swap)
             g_b_perc = np.sin(0.5 * np.pi * s_swap)
-            raw_blend = (
-                a_harm * g_a_harm + b_harm * g_b_harm + a_perc * g_a_perc + b_perc * g_b_perc
-            )
+            rendered_a_ov = (a_harm * g_a_harm + a_perc * g_a_perc).astype(np.float32)
+            rendered_b_ov = (b_harm * g_b_harm + b_perc * g_b_perc).astype(np.float32)
+            raw_blend = rendered_a_ov + rendered_b_ov
             _, mid_m, high_m = split_three_band(raw_blend, sr)
             ov_mix = (low_a * gain_a_low + low_b * gain_b_low + mid_m + high_m).astype(np.float32)
 
@@ -489,4 +496,6 @@ def render_transition(
         tempo_stretch_pct=tempo_stretch_pct,
         phase_correction_ms=round(phase_corr_samples * 1000.0 / float(sr), 2),
         out_wav=out_wav,
+        rendered_a_overlap_stem=_to_mono(rendered_a_ov) if rendered_a_ov is not None else None,
+        rendered_b_overlap_stem=_to_mono(rendered_b_ov) if rendered_b_ov is not None else None,
     )
